@@ -6,6 +6,8 @@ import com.urlinspector.core.ReputationProvider
 import com.urlinspector.core.ScanRepository
 import com.urlinspector.core.ScanUrlUseCase
 import com.urlinspector.core.UrlExpander
+import com.urlinspector.app.history.HistoryViewModel
+import com.urlinspector.app.scan.ScanViewModel
 import com.urlinspector.data.db.SqlDelightScanRepository
 import com.urlinspector.data.db.UrlInspectorDatabase
 import com.urlinspector.data.expansion.HttpUrlExpander
@@ -18,6 +20,7 @@ import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.serialization.kotlinx.json.json
+import org.koin.core.module.dsl.viewModel
 import org.koin.core.qualifier.named
 import org.koin.dsl.module
 
@@ -68,4 +71,7 @@ val appModule = module {
     single<ScanRepository> { SqlDelightScanRepository(get()) }
 
     single { ScanUrlUseCase(get(), get(), get()) }
+
+    viewModel { ScanViewModel(get()) }
+    viewModel { HistoryViewModel(get()) }
 }
