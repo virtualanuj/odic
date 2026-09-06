@@ -49,17 +49,21 @@ class ScanUrlUseCase(
             reputationResult = reputationDeferred.await()
         }
 
+        var finalUrl = url
         val sawShortener = findings.any { it.id == "shortener" }
         if (sawShortener) {
-            val expandedUrl = urlExpander.expand(url)
+            val expandedUrl = runGuarded(reputationTimeoutMillis, onFailure = url) { urlExpander.expand(url) }
             if (expandedUrl.normalized != url.normalized) {
+                finalUrl = expandedUrl
                 coroutineScope {
                     val typosquatDeferred = async { TyposquatHeuristic.evaluate(expandedUrl) }
                     val tldDeferred = async { SuspiciousTldHeuristic.evaluate(expandedUrl) }
+                    val ipLiteralDeferred = async { IpLiteralHeuristic.evaluate(expandedUrl) }
                     val reputationDeferred = async { checkReputation(expandedUrl) }
 
                     typosquatDeferred.await()?.let { findings.add(it) }
                     tldDeferred.await()?.let { findings.add(it) }
+                    ipLiteralDeferred.await()?.let { findings.add(it) }
 
                     val expandedReputation = reputationDeferred.await()
                     if (expandedReputation.matched) {
@@ -84,30 +88,38 @@ class ScanUrlUseCase(
             heuristicFindings = findings,
             reputationResult = reputationResult,
             scannedAt = scannedAt,
+            finalUrl = finalUrl,
         )
 
-        scanRepository.save(
-            ScanHistoryEntry(
-                id = UUID.randomUUID().toString(),
-                url = url.normalized,
-                verdict = verdict,
-                scannedAt = scannedAt,
-            ),
-        )
+        runGuarded(reputationTimeoutMillis, onFailure = Unit) {
+            scanRepository.save(
+                ScanHistoryEntry(
+                    id = UUID.randomUUID().toString(),
+                    url = finalUrl.normalized,
+                    verdict = verdict,
+                    scannedAt = scannedAt,
+                ),
+            )
+        }
 
         return result
     }
 
     private suspend fun checkReputation(url: ScannedUrl): ReputationResult {
-        val result = withTimeoutOrNull(reputationTimeoutMillis) {
+        val fallback = ReputationResult(matched = false, source = reputationProvider.id, checked = false)
+        return runGuarded(reputationTimeoutMillis, onFailure = fallback) { reputationProvider.check(url) }
+    }
+
+    private suspend fun <T> runGuarded(timeoutMillis: Long, onFailure: T, block: suspend () -> T): T {
+        val result = withTimeoutOrNull(timeoutMillis) {
             try {
-                reputationProvider.check(url)
+                block()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 null
             }
         }
-        return result ?: ReputationResult(matched = false, source = reputationProvider.id, checked = false)
+        return result ?: onFailure
     }
 }

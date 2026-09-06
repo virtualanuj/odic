@@ -31,6 +31,7 @@ data class ScanResult(
     val heuristicFindings: List<HeuristicFinding>,
     val reputationResult: ReputationResult,
     val scannedAt: Instant,
+    val finalUrl: ScannedUrl = url,
 )
 
 data class ScanHistoryEntry(

@@ -5,7 +5,9 @@ import com.urlinspector.core.fakes.FakeScanRepository
 import com.urlinspector.core.fakes.FakeUrlExpander
 import com.urlinspector.core.fakes.ThrowingReputationProvider
 import com.urlinspector.core.model.ReputationResult
+import com.urlinspector.core.model.ScannedUrl
 import com.urlinspector.core.model.Verdict
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import java.time.Instant
 import kotlin.test.Test
@@ -82,6 +84,72 @@ class ScanUrlUseCaseTest {
         assertEquals(Verdict.SUSPICIOUS, result.verdict)
         assertTrue(result.heuristicFindings.any { it.id == "shortener" })
         assertTrue(result.heuristicFindings.any { it.id == "typosquat" })
+    }
+
+    @Test
+    fun `shortener expansion also re-checks the expanded destination for IP-literal hosts`() = runTest {
+        val shortUrl = requireNotNull(normalizeUrl("http://bit.ly/xyz789"))
+        val expandedUrl = requireNotNull(normalizeUrl("http://203.0.113.9/wallet"))
+        val expander = FakeUrlExpander(expansions = mapOf(shortUrl.normalized to expandedUrl))
+        val reputation = FakeReputationProvider()
+        val useCase = ScanUrlUseCase(reputation, expander, FakeScanRepository(), now = { fixedNow })
+
+        val result = useCase.scan("http://bit.ly/xyz789")
+
+        assertEquals(Verdict.SUSPICIOUS, result.verdict)
+        assertTrue(result.heuristicFindings.any { it.id == "shortener" })
+        assertTrue(result.heuristicFindings.any { it.id == "ip_literal" })
+    }
+
+    @Test
+    fun `Cyrillic lookalike host is flagged via the real pipeline, not just the heuristic unit test`() = runTest {
+        val reputation = FakeReputationProvider()
+        val useCase = ScanUrlUseCase(reputation, FakeUrlExpander(), FakeScanRepository(), now = { fixedNow })
+
+        val result = useCase.scan("http://\u0430pple.com")
+
+        assertEquals(Verdict.SUSPICIOUS, result.verdict)
+        assertTrue(result.heuristicFindings.any { it.id == "homograph" })
+    }
+
+    @Test
+    fun `repository save failure does not prevent scan from returning a result`() = runTest {
+        val failingRepository = object : ScanRepository {
+            override suspend fun save(entry: com.urlinspector.core.model.ScanHistoryEntry) {
+                throw RuntimeException("simulated database failure")
+            }
+            override suspend fun getAll() = emptyList<com.urlinspector.core.model.ScanHistoryEntry>()
+            override suspend fun deleteById(id: String) {}
+            override suspend fun clearAll() {}
+        }
+        val useCase = ScanUrlUseCase(FakeReputationProvider(), FakeUrlExpander(), failingRepository, now = { fixedNow })
+
+        val result = useCase.scan("http://example.com")
+
+        assertEquals(Verdict.SAFE, result.verdict)
+    }
+
+    @Test
+    fun `reputation lookup that exceeds the timeout falls back to heuristics-only verdict`() = runTest {
+        val slowReputationProvider = object : ReputationProvider {
+            override val id = "slow-reputation"
+            override suspend fun check(url: ScannedUrl): ReputationResult {
+                delay(10_000)
+                return ReputationResult(matched = true, source = id, checked = true)
+            }
+        }
+        val useCase = ScanUrlUseCase(
+            slowReputationProvider,
+            FakeUrlExpander(),
+            FakeScanRepository(),
+            reputationTimeoutMillis = 100L,
+            now = { fixedNow },
+        )
+
+        val result = useCase.scan("http://example.com")
+
+        assertEquals(Verdict.SAFE, result.verdict)
+        assertFalse(result.reputationResult.checked)
     }
 
     @Test

@@ -33,4 +33,27 @@ class UrlNormalizerTest {
         val result = normalizeUrl("  http://example.com  ".trim())
         assertEquals("http://example.com", result?.raw)
     }
+
+    @Test
+    fun `IDN-encodes a non-ASCII host instead of rejecting it`() {
+        // "а" is the Cyrillic small letter "a", a lookalike for ASCII "a".
+        val result = normalizeUrl("http://\u0430pple.com")
+        assertEquals(true, result?.host?.startsWith("xn--"))
+    }
+
+    @Test
+    fun `rejects a javascript scheme`() {
+        assertNull(normalizeUrl("javascript://example.com/%0aalert(1)"))
+    }
+
+    @Test
+    fun `rejects an ftp scheme`() {
+        assertNull(normalizeUrl("ftp://example.com/x"))
+    }
+
+    @Test
+    fun `normalizes scheme and host case and drops fragments`() {
+        val result = normalizeUrl("HTTP://EXAMPLE.com/path#fragment")
+        assertEquals("http://example.com/path", result?.normalized)
+    }
 }

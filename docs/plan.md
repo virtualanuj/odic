@@ -22,6 +22,7 @@ bite-sized treatment in its own pass once it's ready to start.
 
 - Kotlin 2.4.10, Gradle 9.7.1 — the versions already installed on this
   machine; use them verbatim in build files.
+- The Gradle toolchain additionally resolves JDK 17 via the Foojay resolver plugin (settings.gradle.kts) so a fresh machine auto-provisions it; gradle.properties also pins a local Homebrew JDK 17 path as a fallback for this specific dev machine — that fallback line is machine-specific and may need updating (or removing, once the Foojay resolver is confirmed sufficient) on a different machine.
 - `core` is built for M0/M1 as a plain Kotlin/JVM module (`kotlin("jvm")`
   plugin) — **not** yet a full Kotlin Multiplatform module. spec.md §2
   calls for `core` to eventually be KMP with Android/iOS targets; that
@@ -1091,6 +1092,11 @@ git commit -m "feat(core): add reputation/expander/repository interfaces and tes
   with `suspend fun scan(rawUrl: String): ScanResult`, and
   `class InvalidUrlException(raw: String) : IllegalArgumentException`.
   This is the top-level entry point later Android/UI code (M3+) calls.
+- Second pass after shortener expansion: when the URL expands to a
+  different destination, re-run `TyposquatHeuristic`,
+  `SuspiciousTldHeuristic` **and** `IpLiteralHeuristic` against the
+  expanded URL (DR3/DR4/DR6 per spec.md §5/§7), plus the reputation
+  lookup for the expanded destination.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1262,10 +1268,12 @@ class ScanUrlUseCase(
                 coroutineScope {
                     val typosquatDeferred = async { TyposquatHeuristic.evaluate(expandedUrl) }
                     val tldDeferred = async { SuspiciousTldHeuristic.evaluate(expandedUrl) }
+                    val ipLiteralDeferred = async { IpLiteralHeuristic.evaluate(expandedUrl) }
                     val reputationDeferred = async { checkReputation(expandedUrl) }
 
                     typosquatDeferred.await()?.let { findings.add(it) }
                     tldDeferred.await()?.let { findings.add(it) }
+                    ipLiteralDeferred.await()?.let { findings.add(it) }
 
                     val expandedReputation = reputationDeferred.await()
                     if (expandedReputation.matched) {
