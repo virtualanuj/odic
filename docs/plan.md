@@ -12,12 +12,12 @@ for the engineering team to execute against.
 referenced throughout).
 
 This document currently carries a fully detailed, bite-sized task
-breakdown for **M0 (project scaffolding), M1 (core domain), and M2 (data
-layer)** — the part of the plan that is buildable and testable today on
-plain JVM, since the Android SDK is not yet installed on the development
-machine. M3–M6 are kept as milestone-level summaries at the end; each
-gets the same bite-sized treatment in its own pass once it's ready to
-start.
+breakdown for **M0 (project scaffolding), M1 (core domain), M2 (data
+layer), and M3 (Android UI & manual flow)**. The Android SDK, `adb`, and
+an emulator (`url_inspector_avd`, API 35) are now installed on the
+development machine, so M3 is buildable and runnable, not just planned.
+M4–M6 are kept as milestone-level summaries at the end; each gets the
+same bite-sized treatment in its own pass once it's ready to start.
 
 ## Global Constraints
 
@@ -2373,28 +2373,1279 @@ git commit -m "test(data): add end-to-end ScanUrlUseCase integration test over r
 
 ---
 
-## Future Milestones (M3–M6, summary only — detailed per-task breakdown to follow when each is ready to start)
+## M3 Global Constraints
 
-### M3 — Android UI & manual flow
-- **Goal**: user can manually paste a URL and see a verdict, backed by
-  real detection.
-- **Touches**: `androidApp` — paste screen, verdict screen, history list
-  screen, view model, DI wiring (spec.md §11 Dependency Injection).
-- **Exit criteria**: manual-paste flow works end-to-end on-device;
-  history screen lists, deletes, and clears entries (intent.md FR6/FR7).
-- **Blocked on**: Android SDK installation (not yet present on this
-  machine) and the `core` → true KMP conversion noted in Global
-  Constraints above.
-- **Inherits from M2**: the DI wiring that constructs `HttpClient` instances
-  for `:data` must (a) `install(HttpTimeout)` with a bounded request timeout
-  — M2 deliberately built `SafeBrowsingClient`/`HttpUrlExpander` with no
-  client-level timeout, relying entirely on `core.ScanUrlUseCase`'s
-  `withTimeoutOrNull` wrapper, which only protects callers that go through
-  `ScanUrlUseCase` (any other consumer of these classes directly has no
-  bound); (b) construct two separately-configured `HttpClient` instances,
-  one with `followRedirects = false` for `HttpUrlExpander` and one with
-  `ContentNegotiation`/`expectSuccess = true` for `SafeBrowsingClient` — see
-  the KDoc on each class in `:data`.
+These bind Tasks 18-25 below.
+
+- **Android SDK is now installed** on this machine: SDK platform 35,
+  build-tools 35.0.0, platform-tools, `cmdline-tools;latest`, the emulator
+  package, and a `google_apis`/arm64-v8a system image — all via Homebrew's
+  `android-commandlinetools` cask. `ANDROID_HOME` /
+  `local.properties`'s `sdk.dir` point at
+  `/opt/homebrew/share/android-commandlinetools`. An AVD named
+  `url_inspector_avd` (Pixel 6 profile, API 35) exists and has been
+  verified to boot (`adb devices` shows `emulator-5554`).
+- **KMP deferred further, scoped decision confirmed for M3**: `core` and
+  `data` stay plain Kotlin/JVM modules (as they have been since M0/M1).
+  `androidApp` is a normal Android application module that depends on
+  them as ordinary JVM library projects — this works fine with the
+  Android Gradle Plugin. `androidApp` uses plain **Jetpack Compose**
+  (`androidx.compose.*`), not Compose Multiplatform, since there is no
+  KMP target to share UI code with yet. spec.md §1/§2's "Compose
+  Multiplatform" framing is aspirational for a future iOS target: revisit
+  if/when that's actually prioritized.
+- Base package for all `androidApp` code: `com.urlinspector.app`.
+  `applicationId` / manifest package: `com.urlinspector.app`.
+- Dependency versions were checked against Google's and Maven Central's
+  metadata before writing this plan (same rigor as M2): AGP `9.4.0`
+  (stable; `9.5.x` was alpha-only at write time), Kotlin `2.4.10` (already
+  in use), `androidx.activity:activity-compose:1.13.0`,
+  `androidx.lifecycle:*:2.11.0`, `androidx.navigation:navigation-compose:2.10.0`,
+  `androidx.compose:compose-bom:2026.08.00`, `androidx.core:core-ktx:1.19.0`,
+  `io.insert-koin:koin-android`/`koin-androidx-compose:4.2.2`,
+  `app.cash.sqldelight:android-driver:2.3.2` (matching the version already
+  used in `:data`), Ktor `3.5.2` (matching `:data`). If a task's build step
+  hits a resolution/compatibility failure anyway, adjust to the nearest
+  working version, verify with a real build, and document the deviation —
+  same practice as every prior milestone.
+- `minSdk = 26`, `compileSdk = targetSdk = 35`, Java/Kotlin JVM target 17
+  (matching `core`/`data`'s toolchain).
+- **Inherits from M2**: the DI wiring that constructs `HttpClient`
+  instances for `:data` must (a) `install(HttpTimeout)` with a bounded
+  request timeout — M2 deliberately built `SafeBrowsingClient`/
+  `HttpUrlExpander` with no client-level timeout, relying entirely on
+  `core.ScanUrlUseCase`'s `withTimeoutOrNull` wrapper, which only protects
+  callers that go through `ScanUrlUseCase`; (b) construct two
+  separately-configured `HttpClient` instances, one with
+  `followRedirects = false` for `HttpUrlExpander` and one with
+  `ContentNegotiation`/`expectSuccess = true` for `SafeBrowsingClient` —
+  see the KDoc on each class in `:data`.
+- **No real Safe Browsing API key**: the DI module wires
+  `SafeBrowsingReputationProvider` with an empty-string API key by
+  default (a `TODO`-documented placeholder, never a real credential).
+  This is intentional — a real key call will fail (400/403), which
+  `core.ScanUrlUseCase`'s `runGuarded` already turns into a graceful
+  heuristics-only fallback (DR2). This is the correct, demonstrable
+  behavior for now; wiring a real key is a future, separate concern
+  (build config / secrets management), not part of this plan.
+- **Scope-narrowing decision, stated explicitly**: this M3 pass does
+  **not** add Compose UI instrumented tests (`androidTest`) for the three
+  screens — writing correct Compose UI test code blind (without iterating
+  against a running emulator first) has a high chance of being subtly
+  wrong in ways that waste more time than they save. Screens are verified
+  by (a) successful compilation (`assembleDebug`) after each task, and
+  (b) a real on-device/emulator run in Task 25, which is the actual proof
+  this milestone's exit criteria require. `ScanViewModel`'s state-machine
+  logic (the one piece with real branching logic worth unit-testing) DOES
+  get a plain JVM unit test in Task 20. Revisit `androidTest` coverage in
+  a later pass once the UI has stabilized against real device behavior.
+- Out of scope for M3: share-sheet integration (M4), SMS scanning (M5),
+  release build/signing config (M6).
+
+---
+
+## M3 — Android UI & Manual Flow: Detailed Tasks
+
+### Task 18: `androidApp` module scaffolding
+
+**Files:**
+- Modify: `settings.gradle.kts` — add `include(":androidApp")`
+- Create: `androidApp/build.gradle.kts`
+- Create: `androidApp/src/main/AndroidManifest.xml`
+- Create: `androidApp/src/main/res/values/themes.xml`
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/MainActivity.kt`
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/UrlInspectorApp.kt`
+
+**Interfaces:**
+- Consumes: `:core` and `:data` as project dependencies.
+- Produces: a buildable, installable (empty-screen) Android app —
+  `com.urlinspector.app.MainActivity` and `com.urlinspector.app.UrlInspectorApp`
+  (the `Application` subclass, Koin wiring added in Task 19). Later tasks
+  add real Compose content to `MainActivity`.
+
+- [ ] **Step 1: Add `:androidApp` to `settings.gradle.kts`**
+
+```kotlin
+include(":core")
+include(":data")
+include(":androidApp")
+```
+
+- [ ] **Step 2: Create `androidApp/build.gradle.kts`**
+
+```kotlin
+plugins {
+    id("com.android.application") version "9.4.0"
+    kotlin("android") version "2.4.10"
+    kotlin("plugin.compose") version "2.4.10"
+}
+
+android {
+    namespace = "com.urlinspector.app"
+    compileSdk = 35
+
+    defaultConfig {
+        applicationId = "com.urlinspector.app"
+        minSdk = 26
+        targetSdk = 35
+        versionCode = 1
+        versionName = "1.0"
+    }
+
+    buildFeatures {
+        compose = true
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+
+dependencies {
+    implementation(project(":core"))
+    implementation(project(":data"))
+
+    implementation("androidx.core:core-ktx:1.19.0")
+    implementation("androidx.activity:activity-compose:1.13.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.11.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
+    implementation("androidx.navigation:navigation-compose:2.10.0")
+
+    implementation(platform("androidx.compose:compose-bom:2026.08.00"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+    debugImplementation("androidx.compose.ui:ui-tooling")
+
+    implementation("io.insert-koin:koin-android:4.2.2")
+    implementation("io.insert-koin:koin-androidx-compose:4.2.2")
+
+    implementation("app.cash.sqldelight:android-driver:2.3.2")
+    implementation("io.ktor:ktor-client-cio:3.5.2")
+    implementation("io.ktor:ktor-client-content-negotiation:3.5.2")
+    implementation("io.ktor:ktor-serialization-kotlinx-json:3.5.2")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+
+    testImplementation(kotlin("test-junit5"))
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+}
+
+tasks.withType<Test> {
+    useJUnitPlatform()
+}
+```
+
+- [ ] **Step 3: Create `androidApp/src/main/AndroidManifest.xml`**
+
+```xml
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:name=".UrlInspectorApp"
+        android:allowBackup="true"
+        android:label="URL Inspector"
+        android:theme="@style/Theme.UrlInspector">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
+```
+
+- [ ] **Step 4: Create `androidApp/src/main/res/values/themes.xml`**
+
+```xml
+<resources>
+    <style name="Theme.UrlInspector" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
+```
+
+- [ ] **Step 5: Create `androidApp/src/main/kotlin/com/urlinspector/app/UrlInspectorApp.kt`**
+
+A minimal `Application` subclass for now — Task 19 adds Koin startup here.
+
+```kotlin
+package com.urlinspector.app
+
+import android.app.Application
+
+class UrlInspectorApp : Application()
+```
+
+- [ ] **Step 6: Create `androidApp/src/main/kotlin/com/urlinspector/app/MainActivity.kt`**
+
+A minimal placeholder screen for now — later tasks replace the `setContent` body.
+
+```kotlin
+package com.urlinspector.app
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.ui.Modifier
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            MaterialTheme {
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    Text("URL Inspector")
+                }
+            }
+        }
+    }
+}
+```
+
+- [ ] **Step 7: Verify the module builds**
+
+Run: `./gradlew :androidApp:assembleDebug`
+Expected: `BUILD SUCCESSFUL`, produces
+`androidApp/build/outputs/apk/debug/androidApp-debug.apk`. This is the
+first real Android/AGP/Compose build in this project — if any dependency
+version fails to resolve or the AGP/Kotlin-compose-plugin combination
+errors, diagnose and adjust per the Global Constraints note above,
+verify with a real rebuild, and document what changed.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add settings.gradle.kts androidApp/build.gradle.kts androidApp/src/main/AndroidManifest.xml androidApp/src/main/res/values/themes.xml androidApp/src/main/kotlin/com/urlinspector/app/MainActivity.kt androidApp/src/main/kotlin/com/urlinspector/app/UrlInspectorApp.kt
+git commit -m "chore: scaffold androidApp module with Compose"
+```
+
+---
+
+### Task 19: Koin DI wiring
+
+**Files:**
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/di/AppModule.kt`
+- Modify: `androidApp/src/main/kotlin/com/urlinspector/app/UrlInspectorApp.kt`
+
+**Interfaces:**
+- Consumes: `core.ScanUrlUseCase`, `core.ReputationProvider`,
+  `core.UrlExpander`, `core.ScanRepository` (from `:core`);
+  `data.db.SqlDelightScanRepository`, `data.db.UrlInspectorDatabase`,
+  `data.expansion.HttpUrlExpander`, `data.reputation.ReputationCache`,
+  `data.reputation.SafeBrowsingClient`,
+  `data.reputation.SafeBrowsingReputationProvider`,
+  `data.reputation.safeBrowsingJson` (from `:data`, all already built).
+- Produces: a Koin module (`appModule`) that later tasks' `ViewModel`s
+  and Composables resolve `ScanUrlUseCase`/`core.ScanRepository` through
+  (via `koinViewModel()` in Compose, per Task 20/23).
+
+- [ ] **Step 1: Create `androidApp/src/main/kotlin/com/urlinspector/app/di/AppModule.kt`**
+
+```kotlin
+package com.urlinspector.app.di
+
+import android.content.Context
+import app.cash.sqldelight.driver.android.AndroidSqliteDriver
+import com.urlinspector.core.ReputationProvider
+import com.urlinspector.core.ScanRepository
+import com.urlinspector.core.ScanUrlUseCase
+import com.urlinspector.core.UrlExpander
+import com.urlinspector.data.db.SqlDelightScanRepository
+import com.urlinspector.data.db.UrlInspectorDatabase
+import com.urlinspector.data.expansion.HttpUrlExpander
+import com.urlinspector.data.reputation.ReputationCache
+import com.urlinspector.data.reputation.SafeBrowsingClient
+import com.urlinspector.data.reputation.SafeBrowsingReputationProvider
+import com.urlinspector.data.reputation.safeBrowsingJson
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.cio.CIO
+import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.serialization.kotlinx.json.json
+import org.koin.core.qualifier.named
+import org.koin.dsl.module
+
+// TODO(future milestone): real key provisioning (build config / secrets
+// management) is out of scope for M3. An empty key means every reputation
+// lookup fails (400/403), which ScanUrlUseCase.runGuarded already turns
+// into a graceful heuristics-only fallback — this is intended, working
+// DR2 behavior for now, not a bug.
+private const val SAFE_BROWSING_API_KEY = ""
+
+private const val REPUTATION_HTTP_CLIENT = "reputationHttpClient"
+private const val EXPANDER_HTTP_CLIENT = "expanderHttpClient"
+private const val REQUEST_TIMEOUT_MILLIS = 5_000L
+
+val appModule = module {
+    single(named(REPUTATION_HTTP_CLIENT)) {
+        HttpClient(CIO) {
+            expectSuccess = true
+            install(HttpTimeout) { requestTimeoutMillis = REQUEST_TIMEOUT_MILLIS }
+            install(ContentNegotiation) { json(safeBrowsingJson) }
+        }
+    }
+
+    single(named(EXPANDER_HTTP_CLIENT)) {
+        HttpClient(CIO) {
+            followRedirects = false
+            install(HttpTimeout) { requestTimeoutMillis = REQUEST_TIMEOUT_MILLIS }
+        }
+    }
+
+    single { ReputationCache() }
+
+    single<ReputationProvider> {
+        SafeBrowsingReputationProvider(
+            client = SafeBrowsingClient(get(named(REPUTATION_HTTP_CLIENT)), apiKey = SAFE_BROWSING_API_KEY),
+            cache = get(),
+        )
+    }
+
+    single<UrlExpander> { HttpUrlExpander(get(named(EXPANDER_HTTP_CLIENT))) }
+
+    single {
+        val context: Context = get()
+        val driver = AndroidSqliteDriver(UrlInspectorDatabase.Schema, context, "url_inspector.db")
+        UrlInspectorDatabase(driver)
+    }
+
+    single<ScanRepository> { SqlDelightScanRepository(get()) }
+
+    single { ScanUrlUseCase(get(), get(), get()) }
+}
+```
+
+- [ ] **Step 2: Wire Koin startup into `UrlInspectorApp`**
+
+`androidApp/src/main/kotlin/com/urlinspector/app/UrlInspectorApp.kt`:
+
+```kotlin
+package com.urlinspector.app
+
+import android.app.Application
+import com.urlinspector.app.di.appModule
+import org.koin.android.ext.koin.androidContext
+import org.koin.core.context.startKoin
+
+class UrlInspectorApp : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        startKoin {
+            androidContext(this@UrlInspectorApp)
+            modules(appModule)
+        }
+    }
+}
+```
+
+- [ ] **Step 3: Verify the module builds**
+
+Run: `./gradlew :androidApp:assembleDebug`
+Expected: `BUILD SUCCESSFUL`. (No automated DI-graph test in this task —
+per M3 Global Constraints, `AndroidSqliteDriver` needs a real Android
+`Context`, so a plain JVM Koin `checkModules()` test isn't practical here;
+the real proof this graph resolves correctly is the app actually
+launching without crashing in Task 25.)
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add androidApp/src/main/kotlin/com/urlinspector/app/di/AppModule.kt androidApp/src/main/kotlin/com/urlinspector/app/UrlInspectorApp.kt
+git commit -m "feat(androidApp): wire Koin DI module for core/data dependencies"
+```
+
+---
+
+### Task 20: `ScanViewModel`
+
+**Files:**
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/scan/ScanViewModel.kt`
+- Test: `androidApp/src/test/kotlin/com/urlinspector/app/scan/ScanViewModelTest.kt`
+- Test fixture: `androidApp/src/test/kotlin/com/urlinspector/app/fakes/CoreFakes.kt`
+
+**Interfaces:**
+- Consumes: `core.ScanUrlUseCase`, `core.model.ScanResult` (from
+  `:core`). The test needs `core.ReputationProvider`/`core.UrlExpander`/
+  `core.ScanRepository` fakes to construct a real `ScanUrlUseCase` — these
+  live in `core`'s own **test** source set (not visible from
+  `androidApp`'s tests), so this task defines small local equivalents
+  instead of trying to share them across modules.
+- Produces: `sealed interface ScanUiState` (`Idle`, `Loading`,
+  `Success(result)`, `Error(message)`) and
+  `class ScanViewModel(scanUrlUseCase: ScanUrlUseCase) : ViewModel()` with
+  `val uiState: StateFlow<ScanUiState>`, `fun scan(rawUrl: String)`, and
+  `fun reset()`. Task 21 (`PasteScreen`) and Task 24 (navigation) consume
+  this directly.
+
+- [ ] **Step 1: Write local test fakes for `:core`'s interfaces**
+
+`androidApp/src/test/kotlin/com/urlinspector/app/fakes/CoreFakes.kt`:
+
+```kotlin
+package com.urlinspector.app.fakes
+
+import com.urlinspector.core.ReputationProvider
+import com.urlinspector.core.ScanRepository
+import com.urlinspector.core.UrlExpander
+import com.urlinspector.core.model.ReputationResult
+import com.urlinspector.core.model.ScanHistoryEntry
+import com.urlinspector.core.model.ScannedUrl
+
+class FakeReputationProvider(
+    override val id: String = "fake-reputation",
+) : ReputationProvider {
+    override suspend fun check(url: ScannedUrl): ReputationResult =
+        ReputationResult(matched = false, source = id, checked = true)
+}
+
+class FakeUrlExpander : UrlExpander {
+    override suspend fun expand(url: ScannedUrl): ScannedUrl = url
+}
+
+class FakeScanRepository : ScanRepository {
+    val saved = mutableListOf<ScanHistoryEntry>()
+
+    override suspend fun save(entry: ScanHistoryEntry) {
+        saved.add(entry)
+    }
+
+    override suspend fun getAll(): List<ScanHistoryEntry> = saved.toList()
+
+    override suspend fun deleteById(id: String) {
+        saved.removeAll { it.id == id }
+    }
+
+    override suspend fun clearAll() {
+        saved.clear()
+    }
+}
+```
+
+- [ ] **Step 2: Write the failing test**
+
+`androidApp/src/test/kotlin/com/urlinspector/app/scan/ScanViewModelTest.kt`:
+
+```kotlin
+package com.urlinspector.app.scan
+
+import com.urlinspector.app.fakes.FakeReputationProvider
+import com.urlinspector.app.fakes.FakeScanRepository
+import com.urlinspector.app.fakes.FakeUrlExpander
+import com.urlinspector.core.ScanUrlUseCase
+import com.urlinspector.core.model.Verdict
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+class ScanViewModelTest {
+
+    private val dispatcher = StandardTestDispatcher()
+
+    @BeforeEach
+    fun setUp() {
+        Dispatchers.setMain(dispatcher)
+    }
+
+    @AfterEach
+    fun tearDown() {
+        Dispatchers.resetMain()
+    }
+
+    @Test
+    fun `starts in Idle state`() {
+        val viewModel = ScanViewModel(
+            ScanUrlUseCase(FakeReputationProvider(), FakeUrlExpander(), FakeScanRepository()),
+        )
+
+        assertTrue(viewModel.uiState.value is ScanUiState.Idle)
+    }
+
+    @Test
+    fun `scanning a valid URL transitions through Loading to Success`() = runTest(dispatcher) {
+        val viewModel = ScanViewModel(
+            ScanUrlUseCase(FakeReputationProvider(), FakeUrlExpander(), FakeScanRepository()),
+        )
+
+        viewModel.scan("http://example.com")
+        assertTrue(viewModel.uiState.value is ScanUiState.Loading)
+
+        dispatcher.scheduler.advanceUntilIdle()
+
+        val state = viewModel.uiState.value
+        assertTrue(state is ScanUiState.Success)
+        assertEquals(Verdict.SAFE, (state as ScanUiState.Success).result.verdict)
+    }
+
+    @Test
+    fun `scanning an invalid URL transitions to Error`() = runTest(dispatcher) {
+        val viewModel = ScanViewModel(
+            ScanUrlUseCase(FakeReputationProvider(), FakeUrlExpander(), FakeScanRepository()),
+        )
+
+        viewModel.scan("   ")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertTrue(viewModel.uiState.value is ScanUiState.Error)
+    }
+
+    @Test
+    fun `reset returns to Idle`() = runTest(dispatcher) {
+        val viewModel = ScanViewModel(
+            ScanUrlUseCase(FakeReputationProvider(), FakeUrlExpander(), FakeScanRepository()),
+        )
+
+        viewModel.scan("http://example.com")
+        dispatcher.scheduler.advanceUntilIdle()
+        viewModel.reset()
+
+        assertTrue(viewModel.uiState.value is ScanUiState.Idle)
+    }
+}
+```
+
+- [ ] **Step 3: Run test to verify it fails**
+
+Run: `./gradlew :androidApp:testDebugUnitTest --tests "com.urlinspector.app.scan.ScanViewModelTest"`
+Expected: `BUILD FAILED` — `ScanViewModel`/`ScanUiState` are unresolved
+references.
+
+- [ ] **Step 4: Write minimal implementation**
+
+`androidApp/src/main/kotlin/com/urlinspector/app/scan/ScanViewModel.kt`:
+
+```kotlin
+package com.urlinspector.app.scan
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.urlinspector.core.ScanUrlUseCase
+import com.urlinspector.core.model.ScanResult
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+
+sealed interface ScanUiState {
+    data object Idle : ScanUiState
+    data object Loading : ScanUiState
+    data class Success(val result: ScanResult) : ScanUiState
+    data class Error(val message: String) : ScanUiState
+}
+
+class ScanViewModel(
+    private val scanUrlUseCase: ScanUrlUseCase,
+) : ViewModel() {
+
+    private val _uiState = MutableStateFlow<ScanUiState>(ScanUiState.Idle)
+    val uiState: StateFlow<ScanUiState> = _uiState.asStateFlow()
+
+    fun scan(rawUrl: String) {
+        _uiState.value = ScanUiState.Loading
+        viewModelScope.launch {
+            _uiState.value = try {
+                ScanUiState.Success(scanUrlUseCase.scan(rawUrl))
+            } catch (e: Exception) {
+                ScanUiState.Error(e.message ?: "Invalid URL")
+            }
+        }
+    }
+
+    fun reset() {
+        _uiState.value = ScanUiState.Idle
+    }
+}
+```
+
+You will also need `testImplementation("org.junit.jupiter:junit-jupiter-api:5.11.4")` and
+`testImplementation("org.junit.jupiter:junit-jupiter-engine:5.11.4")` added to
+`androidApp/build.gradle.kts`'s dependencies if `@BeforeEach`/`@AfterEach`
+(JUnit 5 Jupiter annotations) aren't already resolvable via
+`kotlin("test-junit5")` alone — check whether the test compiles first
+before adding these; `kotlin("test-junit5")` typically pulls in the
+Jupiter API transitively, but confirm with a real build rather than
+assuming.
+
+- [ ] **Step 5: Run test to verify it passes**
+
+Run: `./gradlew :androidApp:testDebugUnitTest --tests "com.urlinspector.app.scan.ScanViewModelTest"`
+Expected: `BUILD SUCCESSFUL`, 4 tests passed.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add androidApp/src/main/kotlin/com/urlinspector/app/scan/ScanViewModel.kt androidApp/src/test/kotlin/com/urlinspector/app/scan/ScanViewModelTest.kt androidApp/src/test/kotlin/com/urlinspector/app/fakes/CoreFakes.kt
+git commit -m "feat(androidApp): add ScanViewModel with Idle/Loading/Success/Error states"
+```
+
+---
+
+### Task 21: `PasteScreen` composable
+
+**Files:**
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/scan/PasteScreen.kt`
+
+**Interfaces:**
+- Consumes: `ScanUiState` (Task 20).
+- Produces: `@Composable fun PasteScreen(uiState: ScanUiState, onScan: (String) -> Unit, onOpenHistory: () -> Unit, modifier: Modifier = Modifier)`.
+  Task 24 (navigation) wires this into the nav graph.
+
+- [ ] **Step 1: Create the file**
+
+`androidApp/src/main/kotlin/com/urlinspector/app/scan/PasteScreen.kt`:
+
+```kotlin
+package com.urlinspector.app.scan
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+
+@Composable
+fun PasteScreen(
+    uiState: ScanUiState,
+    onScan: (String) -> Unit,
+    onOpenHistory: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var urlText by remember { mutableStateOf("") }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Text("URL Inspector", style = MaterialTheme.typography.headlineMedium)
+
+        OutlinedTextField(
+            value = urlText,
+            onValueChange = { urlText = it },
+            label = { Text("Paste a link to check") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+        )
+
+        Button(
+            onClick = { onScan(urlText) },
+            enabled = urlText.isNotBlank() && uiState !is ScanUiState.Loading,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(if (uiState is ScanUiState.Loading) "Scanning…" else "Scan")
+        }
+
+        if (uiState is ScanUiState.Error) {
+            Text(
+                text = uiState.message,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+
+        TextButton(onClick = onOpenHistory) {
+            Text("View scan history")
+        }
+    }
+}
+```
+
+- [ ] **Step 2: Verify the module builds**
+
+Run: `./gradlew :androidApp:assembleDebug`
+Expected: `BUILD SUCCESSFUL`. (No automated test for this Composable in
+this M3 pass — per M3 Global Constraints, real verification happens on
+the emulator in Task 25.)
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add androidApp/src/main/kotlin/com/urlinspector/app/scan/PasteScreen.kt
+git commit -m "feat(androidApp): add PasteScreen composable"
+```
+
+---
+
+### Task 22: `VerdictScreen` composable
+
+**Files:**
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/scan/VerdictScreen.kt`
+
+**Interfaces:**
+- Consumes: `core.model.ScanResult`, `core.model.Verdict` (from `:core`).
+- Produces: `@Composable fun VerdictScreen(result: ScanResult, onBack: () -> Unit, onOpenLink: (String) -> Unit, modifier: Modifier = Modifier)`.
+  Task 24 (navigation) wires this into the nav graph.
+
+- [ ] **Step 1: Create the file**
+
+`androidApp/src/main/kotlin/com/urlinspector/app/scan/VerdictScreen.kt`:
+
+```kotlin
+package com.urlinspector.app.scan
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import com.urlinspector.core.model.ScanResult
+import com.urlinspector.core.model.Verdict
+
+@Composable
+fun VerdictScreen(
+    result: ScanResult,
+    onBack: () -> Unit,
+    onOpenLink: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        val (label, color) = when (result.verdict) {
+            Verdict.SAFE -> "Safe" to MaterialTheme.colorScheme.primary
+            Verdict.SUSPICIOUS -> "Suspicious" to MaterialTheme.colorScheme.tertiary
+            Verdict.MALICIOUS -> "Malicious" to MaterialTheme.colorScheme.error
+        }
+
+        Text(label, style = MaterialTheme.typography.headlineLarge, color = color)
+        Text(result.finalUrl.normalized, style = MaterialTheme.typography.bodyMedium)
+
+        if (!result.reputationResult.checked) {
+            Text("Reputation check could not be completed — showing on-device checks only.")
+        }
+
+        if (result.heuristicFindings.isEmpty()) {
+            Text("No issues found.")
+        } else {
+            LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                items(result.heuristicFindings) { finding ->
+                    Text("• ${finding.description}", modifier = Modifier.padding(vertical = 4.dp))
+                }
+            }
+        }
+
+        Button(onClick = { onOpenLink(result.finalUrl.normalized) }, modifier = Modifier.fillMaxWidth()) {
+            Text("Open link anyway")
+        }
+
+        TextButton(onClick = onBack) {
+            Text("Scan another link")
+        }
+    }
+}
+```
+
+- [ ] **Step 2: Verify the module builds**
+
+Run: `./gradlew :androidApp:assembleDebug`
+Expected: `BUILD SUCCESSFUL`.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add androidApp/src/main/kotlin/com/urlinspector/app/scan/VerdictScreen.kt
+git commit -m "feat(androidApp): add VerdictScreen composable"
+```
+
+---
+
+### Task 23: History feature — `HistoryViewModel` + `HistoryScreen`
+
+**Files:**
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/history/HistoryViewModel.kt`
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/history/HistoryScreen.kt`
+- Test: `androidApp/src/test/kotlin/com/urlinspector/app/history/HistoryViewModelTest.kt`
+
+**Interfaces:**
+- Consumes: `core.ScanRepository`, `core.model.ScanHistoryEntry`,
+  `core.model.Verdict` (from `:core`); the `FakeScanRepository` test
+  fixture from Task 20 (`androidApp`'s own test source set).
+- Produces: `class HistoryViewModel(scanRepository: ScanRepository) : ViewModel()`
+  with `val entries: StateFlow<List<ScanHistoryEntry>>`,
+  `fun refresh()`, `fun delete(id: String)`, `fun clearAll()`; and
+  `@Composable fun HistoryScreen(entries: List<ScanHistoryEntry>, onDelete: (String) -> Unit, onClearAll: () -> Unit, onBack: () -> Unit, modifier: Modifier = Modifier)`.
+  Task 24 (navigation) wires both into the nav graph.
+
+- [ ] **Step 1: Write the failing test**
+
+`androidApp/src/test/kotlin/com/urlinspector/app/history/HistoryViewModelTest.kt`:
+
+```kotlin
+package com.urlinspector.app.history
+
+import com.urlinspector.app.fakes.FakeScanRepository
+import com.urlinspector.core.model.ScanHistoryEntry
+import com.urlinspector.core.model.Verdict
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
+import java.time.Instant
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+class HistoryViewModelTest {
+
+    private val dispatcher = StandardTestDispatcher()
+
+    @BeforeEach
+    fun setUp() {
+        Dispatchers.setMain(dispatcher)
+    }
+
+    @AfterEach
+    fun tearDown() {
+        Dispatchers.resetMain()
+    }
+
+    @Test
+    fun `loads existing entries on init`() = runTest(dispatcher) {
+        val repository = FakeScanRepository()
+        repository.save(ScanHistoryEntry("1", "http://a.com", Verdict.SAFE, Instant.parse("2026-01-01T00:00:00Z")))
+
+        val viewModel = HistoryViewModel(repository)
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(1, viewModel.entries.value.size)
+    }
+
+    @Test
+    fun `delete removes an entry and refreshes`() = runTest(dispatcher) {
+        val repository = FakeScanRepository()
+        repository.save(ScanHistoryEntry("1", "http://a.com", Verdict.SAFE, Instant.parse("2026-01-01T00:00:00Z")))
+        val viewModel = HistoryViewModel(repository)
+        dispatcher.scheduler.advanceUntilIdle()
+
+        viewModel.delete("1")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertTrue(viewModel.entries.value.isEmpty())
+    }
+
+    @Test
+    fun `clearAll empties the list`() = runTest(dispatcher) {
+        val repository = FakeScanRepository()
+        repository.save(ScanHistoryEntry("1", "http://a.com", Verdict.SAFE, Instant.parse("2026-01-01T00:00:00Z")))
+        repository.save(ScanHistoryEntry("2", "http://b.com", Verdict.SAFE, Instant.parse("2026-01-01T00:00:00Z")))
+        val viewModel = HistoryViewModel(repository)
+        dispatcher.scheduler.advanceUntilIdle()
+
+        viewModel.clearAll()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertTrue(viewModel.entries.value.isEmpty())
+    }
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `./gradlew :androidApp:testDebugUnitTest --tests "com.urlinspector.app.history.HistoryViewModelTest"`
+Expected: `BUILD FAILED` — `HistoryViewModel` is an unresolved reference.
+
+- [ ] **Step 3: Write minimal implementation**
+
+`androidApp/src/main/kotlin/com/urlinspector/app/history/HistoryViewModel.kt`:
+
+```kotlin
+package com.urlinspector.app.history
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.urlinspector.core.ScanRepository
+import com.urlinspector.core.model.ScanHistoryEntry
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+
+class HistoryViewModel(
+    private val scanRepository: ScanRepository,
+) : ViewModel() {
+
+    private val _entries = MutableStateFlow<List<ScanHistoryEntry>>(emptyList())
+    val entries: StateFlow<List<ScanHistoryEntry>> = _entries.asStateFlow()
+
+    init {
+        refresh()
+    }
+
+    fun refresh() {
+        viewModelScope.launch {
+            _entries.value = scanRepository.getAll()
+        }
+    }
+
+    fun delete(id: String) {
+        viewModelScope.launch {
+            scanRepository.deleteById(id)
+            refresh()
+        }
+    }
+
+    fun clearAll() {
+        viewModelScope.launch {
+            scanRepository.clearAll()
+            refresh()
+        }
+    }
+}
+```
+
+`androidApp/src/main/kotlin/com/urlinspector/app/history/HistoryScreen.kt`:
+
+```kotlin
+package com.urlinspector.app.history
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import com.urlinspector.core.model.ScanHistoryEntry
+
+@Composable
+fun HistoryScreen(
+    entries: List<ScanHistoryEntry>,
+    onDelete: (String) -> Unit,
+    onClearAll: () -> Unit,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier.fillMaxSize().padding(24.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text("Scan History", style = MaterialTheme.typography.headlineMedium)
+            TextButton(onClick = onClearAll, enabled = entries.isNotEmpty()) {
+                Text("Clear all")
+            }
+        }
+
+        if (entries.isEmpty()) {
+            Text("No scans yet.")
+        } else {
+            LazyColumn {
+                items(entries, key = { it.id }) { entry ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Column {
+                            Text(entry.url, style = MaterialTheme.typography.bodyMedium)
+                            Text(entry.verdict.name, style = MaterialTheme.typography.labelMedium)
+                        }
+                        TextButton(onClick = { onDelete(entry.id) }) {
+                            Text("Delete")
+                        }
+                    }
+                }
+            }
+        }
+
+        TextButton(onClick = onBack) {
+            Text("Back")
+        }
+    }
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `./gradlew :androidApp:testDebugUnitTest --tests "com.urlinspector.app.history.HistoryViewModelTest"`
+Expected: `BUILD SUCCESSFUL`, 3 tests passed.
+
+- [ ] **Step 5: Verify the whole module still builds (Compose file included)**
+
+Run: `./gradlew :androidApp:assembleDebug`
+Expected: `BUILD SUCCESSFUL`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add androidApp/src/main/kotlin/com/urlinspector/app/history/HistoryViewModel.kt androidApp/src/main/kotlin/com/urlinspector/app/history/HistoryScreen.kt androidApp/src/test/kotlin/com/urlinspector/app/history/HistoryViewModelTest.kt
+git commit -m "feat(androidApp): add HistoryViewModel and HistoryScreen"
+```
+
+---
+
+### Task 24: Navigation wiring — `AppNavHost` + `MainActivity`
+
+**Files:**
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/AppNavHost.kt`
+- Modify: `androidApp/src/main/kotlin/com/urlinspector/app/MainActivity.kt`
+
+**Interfaces:**
+- Consumes: `ScanViewModel`/`ScanUiState` (Task 20), `PasteScreen` (Task
+  21), `VerdictScreen` (Task 22), `HistoryViewModel`/`HistoryScreen`
+  (Task 23) — all already built and committed.
+- Produces: `@Composable fun AppNavHost(onOpenLink: (String) -> Unit, navController: NavHostController = rememberNavController(), scanViewModel: ScanViewModel = koinViewModel())`,
+  wired into `MainActivity.onCreate`. This is the last piece connecting
+  every screen — after this task the app is feature-complete for M3
+  pending on-device verification (Task 25).
+
+- [ ] **Step 1: Create `androidApp/src/main/kotlin/com/urlinspector/app/AppNavHost.kt`**
+
+```kotlin
+package com.urlinspector.app
+
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.navigation.NavHostController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import com.urlinspector.app.history.HistoryScreen
+import com.urlinspector.app.history.HistoryViewModel
+import com.urlinspector.app.scan.PasteScreen
+import com.urlinspector.app.scan.ScanUiState
+import com.urlinspector.app.scan.ScanViewModel
+import com.urlinspector.app.scan.VerdictScreen
+import org.koin.androidx.compose.koinViewModel
+
+private const val ROUTE_PASTE = "paste"
+private const val ROUTE_VERDICT = "verdict"
+private const val ROUTE_HISTORY = "history"
+
+@Composable
+fun AppNavHost(
+    onOpenLink: (String) -> Unit,
+    navController: NavHostController = rememberNavController(),
+    scanViewModel: ScanViewModel = koinViewModel(),
+) {
+    val uiState by scanViewModel.uiState.collectAsState()
+
+    NavHost(navController = navController, startDestination = ROUTE_PASTE) {
+        composable(ROUTE_PASTE) {
+            PasteScreen(
+                uiState = uiState,
+                onScan = { url -> scanViewModel.scan(url) },
+                onOpenHistory = { navController.navigate(ROUTE_HISTORY) },
+            )
+            LaunchedEffect(uiState) {
+                if (uiState is ScanUiState.Success) {
+                    navController.navigate(ROUTE_VERDICT)
+                }
+            }
+        }
+        composable(ROUTE_VERDICT) {
+            val state = uiState
+            if (state is ScanUiState.Success) {
+                VerdictScreen(
+                    result = state.result,
+                    onBack = {
+                        scanViewModel.reset()
+                        navController.popBackStack(ROUTE_PASTE, inclusive = false)
+                    },
+                    onOpenLink = onOpenLink,
+                )
+            }
+        }
+        composable(ROUTE_HISTORY) {
+            val historyViewModel: HistoryViewModel = koinViewModel()
+            val entries by historyViewModel.entries.collectAsState()
+            HistoryScreen(
+                entries = entries,
+                onDelete = historyViewModel::delete,
+                onClearAll = historyViewModel::clearAll,
+                onBack = { navController.popBackStack() },
+            )
+        }
+    }
+}
+```
+
+- [ ] **Step 2: Wire it into `MainActivity`**
+
+Replace the entire contents of
+`androidApp/src/main/kotlin/com/urlinspector/app/MainActivity.kt` with:
+
+```kotlin
+package com.urlinspector.app
+
+import android.content.Intent
+import android.net.Uri
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.ui.Modifier
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            MaterialTheme {
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    AppNavHost(onOpenLink = ::openLink)
+                }
+            }
+        }
+    }
+
+    private fun openLink(url: String) {
+        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    }
+}
+```
+
+- [ ] **Step 3: Verify the module builds**
+
+Run: `./gradlew :androidApp:assembleDebug`
+Expected: `BUILD SUCCESSFUL`.
+
+- [ ] **Step 4: Run the full unit test suite across all modules**
+
+Run: `./gradlew test testDebugUnitTest`
+Expected: `BUILD SUCCESSFUL` — `:core:test` (38), `:data:test` (18),
+`:androidApp:testDebugUnitTest` (7: 4 `ScanViewModelTest` + 3
+`HistoryViewModelTest`) all green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add androidApp/src/main/kotlin/com/urlinspector/app/AppNavHost.kt androidApp/src/main/kotlin/com/urlinspector/app/MainActivity.kt
+git commit -m "feat(androidApp): wire navigation between paste, verdict, and history screens"
+```
+
+---
+
+### Task 25: On-device/emulator verification
+
+**Files:** none created — this task drives the already-built app on the
+running emulator to prove the M3 exit criteria are actually met, not
+just that the code compiles.
+
+**Interfaces:**
+- Consumes: the fully-assembled `androidApp-debug.apk` from Tasks 18-24.
+- Produces: a verification report — no new source files.
+
+- [ ] **Step 1: Build the debug APK**
+
+Run: `./gradlew :androidApp:assembleDebug`
+Expected: `BUILD SUCCESSFUL`.
+
+- [ ] **Step 2: Confirm the emulator is running**
+
+Run: `adb devices`
+Expected: `emulator-5554` listed with state `device`. If not running,
+start it: `emulator -avd url_inspector_avd -no-window -no-audio -no-boot-anim &`
+then `adb wait-for-device` and poll
+`adb shell getprop sys.boot_completed` until it prints `1`.
+
+- [ ] **Step 3: Install and launch the app**
+
+Run: `adb install -r androidApp/build/outputs/apk/debug/androidApp-debug.apk`
+Then: `adb shell am start -n com.urlinspector.app/.MainActivity`
+Expected: no crash. Confirm with
+`adb logcat -d -s AndroidRuntime:E *:S` showing no fatal exception
+stack trace from `com.urlinspector.app` since the launch.
+
+- [ ] **Step 4: Drive the manual-paste flow**
+
+Use `adb shell input tap <x> <y>` / `adb shell input text <url>` (take a
+screenshot first via `adb exec-out screencap -p > /tmp/screen1.png` and
+pull it locally to find real coordinates for the text field and Scan
+button on this device's resolution — do not guess coordinates blind).
+Sequence to verify:
+1. Tap the URL text field, type `http://paypa1.com/login` (a typosquat
+   example — no network dependency needed for this one, since the
+   heuristic fires regardless of the reputation lookup's outcome).
+2. Tap "Scan".
+3. Screenshot again — confirm the Verdict screen appears showing
+   "Suspicious" and a reason mentioning `paypal.com`.
+4. Tap "Scan another link", confirm it returns to the paste screen.
+5. Tap "View scan history", screenshot — confirm the just-completed scan
+   appears in the list.
+6. Tap "Delete" on that entry, screenshot — confirm the list is now
+   empty (or "No scans yet." shows).
+
+- [ ] **Step 5: Check logcat for the expected graceful reputation fallback**
+
+Run: `adb logcat -d | grep -i "url-inspector\|ktor\|HttpTimeout" | tail -50`
+This is informational, not a hard pass/fail gate — with the empty API
+key (M3 Global Constraints), the reputation lookup is expected to fail
+per-request (a 400/403 from Safe Browsing, or a timeout if there's no
+network path from the emulator), and the verdict screen should still
+render correctly using heuristics alone. If the app crashes instead of
+falling back gracefully, that's a real regression to investigate, not
+expected behavior.
+
+- [ ] **Step 6: Write up the verification result**
+
+No commit needed for this task (no source changes) — report the outcome
+directly: which steps passed, any screenshots taken, and confirmation
+that the M3 exit criteria (docs/plan.md M3 Global Constraints /
+docs/intent.md FR6/FR7) are met on a real running emulator, not just in
+unit tests.
+
+---
+
+## Future Milestones (M4–M6, summary only — detailed per-task breakdown to follow when each is ready to start)
 
 ### M4 — Share-sheet integration
 - **Goal**: links shared from WhatsApp/Messages open directly to a
