@@ -12,11 +12,12 @@ for the engineering team to execute against.
 referenced throughout).
 
 This document currently carries a fully detailed, bite-sized task
-breakdown for **M0 (project scaffolding) and M1 (core domain)** — the part
-of the plan that is buildable and testable today on plain JVM, since the
-Android SDK is not yet installed on the development machine. M2–M6 are
-kept as milestone-level summaries at the end; each gets the same
-bite-sized treatment in its own pass once it's ready to start.
+breakdown for **M0 (project scaffolding), M1 (core domain), and M2 (data
+layer)** — the part of the plan that is buildable and testable today on
+plain JVM, since the Android SDK is not yet installed on the development
+machine. M3–M6 are kept as milestone-level summaries at the end; each
+gets the same bite-sized treatment in its own pass once it's ready to
+start.
 
 ## Global Constraints
 
@@ -1344,18 +1345,1035 @@ git commit -m "feat(core): add ScanUrlUseCase detection pipeline and verdict der
 
 ---
 
-## Future Milestones (M2–M6, summary only — detailed per-task breakdown to follow when each is ready to start)
+## M2 Global Constraints
 
-### M2 — Data layer
-- **Goal**: real reputation and storage implementations behind the
-  domain interfaces.
-- **Touches**: `data` — HTTP client setup, `SafeBrowsingReputationProvider`
-  (spec.md §6), storage schema + `ScanRepository` impl (spec.md §9
-  Storage), in-memory reputation cache (spec.md §10 Networking &
-  Concurrency).
-- **Exit criteria**: `data` tests pass against a mocked HTTP client and an
-  in-memory storage driver; `ScanUrlUseCase` runs end-to-end against real
-  (or mocked) network in an integration test.
+These bind Tasks 11-17 below, in addition to the Global Constraints section
+above (which still applies — `core` is untouched by M2).
+
+- `:data` is built as a plain Kotlin/JVM module for M2, same interim scope
+  reasoning as `:core` (spec.md §2's full KMP conversion is deferred to
+  when the Android SDK is set up).
+- Dependency versions — Ktor `3.5.2`, SQLDelight `2.3.2`,
+  `kotlinx-serialization-json:1.9.0` — were verified resolvable against
+  Kotlin 2.4.10 / Gradle 9.7.1 in this environment before this plan was
+  written (checked against Maven Central metadata). If a task's build step
+  hits a resolution or compatibility failure anyway, adjust to the nearest
+  working version, verify with a real build, and document the deviation in
+  that task's report — the same way the M1 JDK-toolchain issue was
+  resolved and recorded, not guessed around.
+- API key handling: `SafeBrowsingClient`/`SafeBrowsingReputationProvider`
+  take the API key as a plain constructor `String` parameter. No key is
+  ever hardcoded, committed, or read from a real config file in this
+  milestone — M2's own tests only ever talk to Ktor's `MockEngine`, never
+  the real Safe Browsing endpoint. Real key provisioning (build config,
+  remote config, etc. — spec.md §16 open question) is androidApp's concern
+  in a later milestone.
+- Timeouts: the `data` layer does not configure its own Ktor request
+  timeouts in M2. `core.ScanUrlUseCase` (M1) already wraps both
+  `reputationProvider.check(...)` and `urlExpander.expand(...)` in
+  `withTimeoutOrNull` via its `runGuarded` helper, which cooperatively
+  cancels a hung network call at the use-case boundary — that's the
+  intended single place this is handled (spec.md §10, §13), so don't
+  re-add timeout config in `data` and don't treat its absence there as a
+  gap.
+- SQLDelight code generation: the exact generated `*Queries` accessor
+  property name on the generated `Database` class depends on the `.sq`
+  file name and SQLDelight's naming convention. Task 12 must verify the
+  real generated name (build and inspect
+  `data/build/generated/sqldelight/...`, or let a compile error reveal it)
+  rather than assuming the name given in this plan is exactly right.
+
+---
+
+## M2 — Data Layer: Detailed Tasks
+
+### Task 11: `:data` module scaffolding
+
+**Files:**
+- Modify: `settings.gradle.kts` — add `include(":data")`
+- Create: `data/build.gradle.kts`
+
+**Interfaces:**
+- Consumes: the `:core` module (Tasks 1-10) as a project dependency.
+- Produces: a `:data` Gradle module with Ktor, SQLDelight, and
+  kotlinx-serialization wired, that later tasks add Kotlin sources/tests
+  to.
+
+- [ ] **Step 1: Add `:data` to `settings.gradle.kts`**
+
+Edit the existing `settings.gradle.kts` so the `include(...)` line reads:
+
+```kotlin
+include(":core")
+include(":data")
+```
+
+(Leave the `pluginManagement`/`plugins` Foojay-resolver blocks and
+`rootProject.name` line exactly as they are — only the `include` line
+changes.)
+
+- [ ] **Step 2: Create `data/build.gradle.kts`**
+
+```kotlin
+plugins {
+    kotlin("jvm") version "2.4.10"
+    kotlin("plugin.serialization") version "2.4.10"
+    id("app.cash.sqldelight") version "2.3.2"
+}
+
+kotlin {
+    jvmToolchain(17)
+}
+
+dependencies {
+    implementation(project(":core"))
+
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
+
+    implementation("io.ktor:ktor-client-core:3.5.2")
+    implementation("io.ktor:ktor-client-cio:3.5.2")
+    implementation("io.ktor:ktor-client-content-negotiation:3.5.2")
+    implementation("io.ktor:ktor-serialization-kotlinx-json:3.5.2")
+
+    implementation("app.cash.sqldelight:sqlite-driver:2.3.2")
+
+    testImplementation(kotlin("test-junit5"))
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    testImplementation("io.ktor:ktor-client-mock:3.5.2")
+}
+
+sqldelight {
+    databases {
+        create("UrlInspectorDatabase") {
+            packageName.set("com.urlinspector.data.db")
+        }
+    }
+}
+
+tasks.test {
+    useJUnitPlatform()
+}
+```
+
+- [ ] **Step 3: Verify the module configures**
+
+Run: `./gradlew :data:help`
+Expected: `BUILD SUCCESSFUL`. This resolves all the new plugins and
+dependencies (Ktor, SQLDelight, kotlinx-serialization) against Kotlin
+2.4.10/Gradle 9.7.1 for the first time — if it fails with a version
+conflict or "plugin not found", that's the signal to adjust versions per
+the M2 Global Constraints note above. Record whatever you had to change.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add settings.gradle.kts data/build.gradle.kts
+git commit -m "chore: scaffold :data module with Ktor/SQLDelight/serialization"
+```
+
+---
+
+### Task 12: SQLDelight schema and `ScanRepository` implementation
+
+**Files:**
+- Create: `data/src/main/sqldelight/com/urlinspector/data/db/ScanHistory.sq`
+- Create: `data/src/main/kotlin/com/urlinspector/data/db/SqlDelightScanRepository.kt`
+- Test: `data/src/test/kotlin/com/urlinspector/data/db/SqlDelightScanRepositoryTest.kt`
+
+**Interfaces:**
+- Consumes: `core.ScanRepository`, `core.model.ScanHistoryEntry`,
+  `core.model.Verdict` (from `:core`, Tasks 2 and 9).
+- Produces: `SqlDelightScanRepository(database: UrlInspectorDatabase) : ScanRepository`
+  — a real, disk/in-memory-SQLite-backed implementation. Task 17's
+  integration test constructs this directly.
+
+- [ ] **Step 1: Write the failing test**
+
+`data/src/test/kotlin/com/urlinspector/data/db/SqlDelightScanRepositoryTest.kt`:
+
+```kotlin
+package com.urlinspector.data.db
+
+import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import com.urlinspector.core.model.ScanHistoryEntry
+import com.urlinspector.core.model.Verdict
+import kotlinx.coroutines.test.runTest
+import java.time.Instant
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+class SqlDelightScanRepositoryTest {
+
+    private fun newRepository(): SqlDelightScanRepository {
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        UrlInspectorDatabase.Schema.create(driver)
+        return SqlDelightScanRepository(UrlInspectorDatabase(driver))
+    }
+
+    @Test
+    fun `save then getAll returns entries newest first`() = runTest {
+        val repository = newRepository()
+        val older = ScanHistoryEntry("1", "http://a.com", Verdict.SAFE, Instant.parse("2026-01-01T00:00:00Z"))
+        val newer = ScanHistoryEntry("2", "http://b.com", Verdict.MALICIOUS, Instant.parse("2026-01-02T00:00:00Z"))
+
+        repository.save(older)
+        repository.save(newer)
+
+        assertEquals(listOf(newer, older), repository.getAll())
+    }
+
+    @Test
+    fun `deleteById removes only the matching entry`() = runTest {
+        val repository = newRepository()
+        val keep = ScanHistoryEntry("1", "http://a.com", Verdict.SAFE, Instant.parse("2026-01-01T00:00:00Z"))
+        val remove = ScanHistoryEntry("2", "http://b.com", Verdict.SAFE, Instant.parse("2026-01-01T00:00:00Z"))
+        repository.save(keep)
+        repository.save(remove)
+
+        repository.deleteById("2")
+
+        assertEquals(listOf(keep), repository.getAll())
+    }
+
+    @Test
+    fun `clearAll empties the history`() = runTest {
+        val repository = newRepository()
+        repository.save(ScanHistoryEntry("1", "http://a.com", Verdict.SAFE, Instant.parse("2026-01-01T00:00:00Z")))
+
+        repository.clearAll()
+
+        assertTrue(repository.getAll().isEmpty())
+    }
+}
+```
+
+- [ ] **Step 2: Create the SQLDelight schema first (needed before the test can even compile)**
+
+`data/src/main/sqldelight/com/urlinspector/data/db/ScanHistory.sq`:
+
+```sql
+CREATE TABLE ScanHistoryRow (
+    id TEXT NOT NULL PRIMARY KEY,
+    url TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    scannedAt INTEGER NOT NULL
+);
+
+insertEntry:
+INSERT INTO ScanHistoryRow(id, url, verdict, scannedAt)
+VALUES (?, ?, ?, ?);
+
+selectAll:
+SELECT * FROM ScanHistoryRow ORDER BY scannedAt DESC;
+
+deleteById:
+DELETE FROM ScanHistoryRow WHERE id = ?;
+
+deleteAll:
+DELETE FROM ScanHistoryRow;
+```
+
+- [ ] **Step 3: Run codegen and confirm the generated accessor name**
+
+Run: `./gradlew :data:generateMainUrlInspectorDatabaseInterface`
+Then inspect the generated `Queries` accessor property on the generated
+`UrlInspectorDatabase` class (search
+`data/build/generated/sqldelight/code/UrlInspectorDatabase/` for the
+generated `UrlInspectorDatabase.kt`). Because the `.sq` file above is
+named `ScanHistory.sq`, SQLDelight is expected to generate an accessor
+named `scanHistoryQueries` on the database object (derived from the file
+name, not the table name) — confirm this is the actual generated name
+before writing Step 4. If it's different, use the real name throughout
+Step 4 instead of guessing.
+
+- [ ] **Step 4: Run test to verify it fails**
+
+Run: `./gradlew :data:test --tests "com.urlinspector.data.db.SqlDelightScanRepositoryTest"`
+Expected: `BUILD FAILED` — `SqlDelightScanRepository` is an unresolved
+reference (the schema/generated types from Step 2-3 now exist, but the
+repository class implementing `ScanRepository` doesn't yet).
+
+- [ ] **Step 5: Write minimal implementation**
+
+`data/src/main/kotlin/com/urlinspector/data/db/SqlDelightScanRepository.kt`
+(adjust `scanHistoryQueries` below if Step 3 found a different generated
+name):
+
+```kotlin
+package com.urlinspector.data.db
+
+import com.urlinspector.core.ScanRepository
+import com.urlinspector.core.model.ScanHistoryEntry
+import com.urlinspector.core.model.Verdict
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.time.Instant
+
+class SqlDelightScanRepository(
+    private val database: UrlInspectorDatabase,
+) : ScanRepository {
+
+    override suspend fun save(entry: ScanHistoryEntry) = withContext(Dispatchers.IO) {
+        database.scanHistoryQueries.insertEntry(
+            id = entry.id,
+            url = entry.url,
+            verdict = entry.verdict.name,
+            scannedAt = entry.scannedAt.toEpochMilli(),
+        )
+    }
+
+    override suspend fun getAll(): List<ScanHistoryEntry> = withContext(Dispatchers.IO) {
+        database.scanHistoryQueries.selectAll().executeAsList().map { row ->
+            ScanHistoryEntry(
+                id = row.id,
+                url = row.url,
+                verdict = Verdict.valueOf(row.verdict),
+                scannedAt = Instant.ofEpochMilli(row.scannedAt),
+            )
+        }
+    }
+
+    override suspend fun deleteById(id: String) = withContext(Dispatchers.IO) {
+        database.scanHistoryQueries.deleteById(id)
+    }
+
+    override suspend fun clearAll() = withContext(Dispatchers.IO) {
+        database.scanHistoryQueries.deleteAll()
+    }
+}
+```
+
+- [ ] **Step 6: Run test to verify it passes**
+
+Run: `./gradlew :data:test --tests "com.urlinspector.data.db.SqlDelightScanRepositoryTest"`
+Expected: `BUILD SUCCESSFUL`, 3 tests passed.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add data/src/main/sqldelight/com/urlinspector/data/db/ScanHistory.sq data/src/main/kotlin/com/urlinspector/data/db/SqlDelightScanRepository.kt data/src/test/kotlin/com/urlinspector/data/db/SqlDelightScanRepositoryTest.kt
+git commit -m "feat(data): add SQLDelight-backed ScanRepository"
+```
+
+---
+
+### Task 13: In-memory reputation cache
+
+**Files:**
+- Create: `data/src/main/kotlin/com/urlinspector/data/reputation/ReputationCache.kt`
+- Test: `data/src/test/kotlin/com/urlinspector/data/reputation/ReputationCacheTest.kt`
+
+**Interfaces:**
+- Consumes: `core.model.ReputationResult` (from `:core`, Task 2).
+- Produces: `ReputationCache(maxSize: Int = 200, ttlMillis: Long = 600_000)`
+  with `fun get(key: String, now: Instant): ReputationResult?` and
+  `fun put(key: String, result: ReputationResult, now: Instant)`. Task 15
+  (`SafeBrowsingReputationProvider`) consumes this directly.
+
+- [ ] **Step 1: Write the failing test**
+
+`data/src/test/kotlin/com/urlinspector/data/reputation/ReputationCacheTest.kt`:
+
+```kotlin
+package com.urlinspector.data.reputation
+
+import com.urlinspector.core.model.ReputationResult
+import java.time.Instant
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNull
+
+class ReputationCacheTest {
+    @Test
+    fun `a fresh entry is returned before it expires`() {
+        val cache = ReputationCache(ttlMillis = 10_000)
+        val now = Instant.parse("2026-01-01T00:00:00Z")
+        val result = ReputationResult(matched = true, source = "safe-browsing", checked = true)
+
+        cache.put("http://example.com", result, now)
+
+        assertEquals(result, cache.get("http://example.com", now.plusMillis(5_000)))
+    }
+
+    @Test
+    fun `an expired entry is not returned`() {
+        val cache = ReputationCache(ttlMillis = 10_000)
+        val now = Instant.parse("2026-01-01T00:00:00Z")
+        val result = ReputationResult(matched = true, source = "safe-browsing", checked = true)
+
+        cache.put("http://example.com", result, now)
+
+        assertNull(cache.get("http://example.com", now.plusMillis(10_001)))
+    }
+
+    @Test
+    fun `exceeding max size evicts the least recently used entry`() {
+        val cache = ReputationCache(maxSize = 2, ttlMillis = 60_000)
+        val now = Instant.parse("2026-01-01T00:00:00Z")
+        val a = ReputationResult(matched = false, source = "safe-browsing", checked = true)
+        val b = ReputationResult(matched = false, source = "safe-browsing", checked = true)
+        val c = ReputationResult(matched = false, source = "safe-browsing", checked = true)
+
+        cache.put("a", a, now)
+        cache.put("b", b, now)
+        cache.put("c", c, now)
+
+        assertNull(cache.get("a", now))
+        assertEquals(b, cache.get("b", now))
+        assertEquals(c, cache.get("c", now))
+    }
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `./gradlew :data:test --tests "com.urlinspector.data.reputation.ReputationCacheTest"`
+Expected: `BUILD FAILED` — `ReputationCache` is an unresolved reference.
+
+- [ ] **Step 3: Write minimal implementation**
+
+`data/src/main/kotlin/com/urlinspector/data/reputation/ReputationCache.kt`:
+
+```kotlin
+package com.urlinspector.data.reputation
+
+import com.urlinspector.core.model.ReputationResult
+import java.time.Instant
+
+class ReputationCache(
+    private val maxSize: Int = 200,
+    private val ttlMillis: Long = 10 * 60 * 1000,
+) {
+    private data class Entry(val result: ReputationResult, val cachedAt: Instant)
+
+    private val entries = LinkedHashMap<String, Entry>(16, 0.75f, true)
+
+    @Synchronized
+    fun get(key: String, now: Instant): ReputationResult? {
+        val entry = entries[key] ?: return null
+        val age = now.toEpochMilli() - entry.cachedAt.toEpochMilli()
+        if (age > ttlMillis) {
+            entries.remove(key)
+            return null
+        }
+        return entry.result
+    }
+
+    @Synchronized
+    fun put(key: String, result: ReputationResult, now: Instant) {
+        entries[key] = Entry(result, now)
+        if (entries.size > maxSize) {
+            val oldestKey = entries.keys.iterator().next()
+            entries.remove(oldestKey)
+        }
+    }
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `./gradlew :data:test --tests "com.urlinspector.data.reputation.ReputationCacheTest"`
+Expected: `BUILD SUCCESSFUL`, 3 tests passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add data/src/main/kotlin/com/urlinspector/data/reputation/ReputationCache.kt data/src/test/kotlin/com/urlinspector/data/reputation/ReputationCacheTest.kt
+git commit -m "feat(data): add in-memory reputation result cache"
+```
+
+---
+
+### Task 14: Safe Browsing DTOs and low-level Ktor client
+
+**Files:**
+- Create: `data/src/main/kotlin/com/urlinspector/data/reputation/SafeBrowsingModels.kt`
+- Create: `data/src/main/kotlin/com/urlinspector/data/reputation/SafeBrowsingClient.kt`
+- Test: `data/src/test/kotlin/com/urlinspector/data/reputation/SafeBrowsingClientTest.kt`
+
+**Interfaces:**
+- Consumes: nothing from `:core` — this is a standalone HTTP client
+  wrapper.
+- Produces: `SafeBrowsingClient(httpClient: HttpClient, apiKey: String, baseUrl: String = ...)`
+  with `suspend fun findThreatMatches(url: String): List<SafeBrowsingThreatMatch>`.
+  Task 15 (`SafeBrowsingReputationProvider`) consumes this directly.
+
+- [ ] **Step 1: Write the failing test**
+
+`data/src/test/kotlin/com/urlinspector/data/reputation/SafeBrowsingClientTest.kt`:
+
+```kotlin
+package com.urlinspector.data.reputation
+
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.headersOf
+import io.ktor.serialization.kotlinx.json.json
+import io.ktor.utils.io.ByteReadChannel
+import kotlinx.coroutines.test.runTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+import kotlin.test.assertFailsWith
+
+class SafeBrowsingClientTest {
+
+    private fun clientWith(responseBody: String, status: HttpStatusCode = HttpStatusCode.OK): SafeBrowsingClient {
+        val engine = MockEngine { _ ->
+            respond(
+                content = ByteReadChannel(responseBody),
+                status = status,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = true
+            install(ContentNegotiation) { json() }
+        }
+        return SafeBrowsingClient(httpClient, apiKey = "test-key")
+    }
+
+    @Test
+    fun `returns matches when the API reports a threat`() = runTest {
+        val client = clientWith("""{"matches":[{"threatType":"MALWARE"}]}""")
+
+        val matches = client.findThreatMatches("http://malicious.example.com")
+
+        assertEquals(1, matches.size)
+        assertEquals("MALWARE", matches.first().threatType)
+    }
+
+    @Test
+    fun `returns an empty list when the API reports no threats`() = runTest {
+        val client = clientWith("""{}""")
+
+        val matches = client.findThreatMatches("http://example.com")
+
+        assertTrue(matches.isEmpty())
+    }
+
+    @Test
+    fun `throws when the API returns an error status`() = runTest {
+        val client = clientWith("""{"error":"bad request"}""", status = HttpStatusCode.BadRequest)
+
+        assertFailsWith<Exception> {
+            client.findThreatMatches("http://example.com")
+        }
+    }
+}
+```
+
+Note: the third test relies on `expectSuccess = true` (set in
+`clientWith` above) — this makes Ktor throw on a non-2xx response
+instead of silently returning it. Carry `expectSuccess = true` into any
+other `HttpClient` you construct in this and later tasks' tests/code where
+the same throw-on-error behavior is expected.
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `./gradlew :data:test --tests "com.urlinspector.data.reputation.SafeBrowsingClientTest"`
+Expected: `BUILD FAILED` — `SafeBrowsingClient`/`SafeBrowsingThreatMatch`
+are unresolved references.
+
+- [ ] **Step 3: Write minimal implementation**
+
+`data/src/main/kotlin/com/urlinspector/data/reputation/SafeBrowsingModels.kt`:
+
+```kotlin
+package com.urlinspector.data.reputation
+
+import kotlinx.serialization.Serializable
+
+@Serializable
+data class SafeBrowsingClientInfo(
+    val clientId: String,
+    val clientVersion: String,
+)
+
+@Serializable
+data class SafeBrowsingThreatEntry(
+    val url: String,
+)
+
+@Serializable
+data class SafeBrowsingThreatInfo(
+    val threatTypes: List<String>,
+    val platformTypes: List<String>,
+    val threatEntryTypes: List<String>,
+    val threatEntries: List<SafeBrowsingThreatEntry>,
+)
+
+@Serializable
+data class SafeBrowsingFindRequest(
+    val client: SafeBrowsingClientInfo,
+    val threatInfo: SafeBrowsingThreatInfo,
+)
+
+@Serializable
+data class SafeBrowsingThreatMatch(
+    val threatType: String,
+)
+
+@Serializable
+data class SafeBrowsingFindResponse(
+    val matches: List<SafeBrowsingThreatMatch>? = null,
+)
+```
+
+`data/src/main/kotlin/com/urlinspector/data/reputation/SafeBrowsingClient.kt`:
+
+```kotlin
+package com.urlinspector.data.reputation
+
+import io.ktor.client.HttpClient
+import io.ktor.client.call.body
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
+import io.ktor.client.request.url
+import io.ktor.http.ContentType
+import io.ktor.http.contentType
+
+private const val DEFAULT_BASE_URL = "https://safebrowsing.googleapis.com/v4/threatMatches:find"
+private val DEFAULT_THREAT_TYPES = listOf("MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE")
+
+class SafeBrowsingClient(
+    private val httpClient: HttpClient,
+    private val apiKey: String,
+    private val baseUrl: String = DEFAULT_BASE_URL,
+) {
+    suspend fun findThreatMatches(url: String): List<SafeBrowsingThreatMatch> {
+        val request = SafeBrowsingFindRequest(
+            client = SafeBrowsingClientInfo(clientId = "url-inspector", clientVersion = "1.0.0"),
+            threatInfo = SafeBrowsingThreatInfo(
+                threatTypes = DEFAULT_THREAT_TYPES,
+                platformTypes = listOf("ANY_PLATFORM"),
+                threatEntryTypes = listOf("URL"),
+                threatEntries = listOf(SafeBrowsingThreatEntry(url = url)),
+            ),
+        )
+
+        val response: SafeBrowsingFindResponse = httpClient.post {
+            url("$baseUrl?key=$apiKey")
+            contentType(ContentType.Application.Json)
+            setBody(request)
+        }.body()
+
+        return response.matches.orEmpty()
+    }
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `./gradlew :data:test --tests "com.urlinspector.data.reputation.SafeBrowsingClientTest"`
+Expected: `BUILD SUCCESSFUL`, 3 tests passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add data/src/main/kotlin/com/urlinspector/data/reputation/SafeBrowsingModels.kt data/src/main/kotlin/com/urlinspector/data/reputation/SafeBrowsingClient.kt data/src/test/kotlin/com/urlinspector/data/reputation/SafeBrowsingClientTest.kt
+git commit -m "feat(data): add Safe Browsing DTOs and Ktor client"
+```
+
+---
+
+### Task 15: `SafeBrowsingReputationProvider` (implements `core.ReputationProvider`)
+
+**Files:**
+- Create: `data/src/main/kotlin/com/urlinspector/data/reputation/SafeBrowsingReputationProvider.kt`
+- Test: `data/src/test/kotlin/com/urlinspector/data/reputation/SafeBrowsingReputationProviderTest.kt`
+
+**Interfaces:**
+- Consumes: `core.ReputationProvider`, `core.model.ReputationResult`,
+  `core.model.ScannedUrl` (from `:core`), `SafeBrowsingClient` (Task 14),
+  `ReputationCache` (Task 13).
+- Produces: `SafeBrowsingReputationProvider(client: SafeBrowsingClient, cache: ReputationCache, id: String = "safe-browsing", now: () -> Instant = Instant::now) : ReputationProvider`.
+  Task 17's integration test constructs this directly; it's the concrete
+  `ReputationProvider` a future androidApp DI module will bind.
+
+- [ ] **Step 1: Write the failing test**
+
+`data/src/test/kotlin/com/urlinspector/data/reputation/SafeBrowsingReputationProviderTest.kt`:
+
+```kotlin
+package com.urlinspector.data.reputation
+
+import com.urlinspector.core.model.ScannedUrl
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.headersOf
+import io.ktor.serialization.kotlinx.json.json
+import io.ktor.utils.io.ByteReadChannel
+import kotlinx.coroutines.test.runTest
+import java.time.Instant
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+class SafeBrowsingReputationProviderTest {
+
+    @Test
+    fun `a threat match is reported and cached`() = runTest {
+        var requestCount = 0
+        val engine = MockEngine { _ ->
+            requestCount++
+            respond(
+                content = ByteReadChannel("""{"matches":[{"threatType":"MALWARE"}]}"""),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = true
+            install(ContentNegotiation) { json() }
+        }
+        val client = SafeBrowsingClient(httpClient, apiKey = "test-key")
+        val cache = ReputationCache()
+        val fixedNow = Instant.parse("2026-01-01T00:00:00Z")
+        val provider = SafeBrowsingReputationProvider(client, cache, now = { fixedNow })
+        val url = ScannedUrl(raw = "http://malicious.example.com", normalized = "http://malicious.example.com/", host = "malicious.example.com")
+
+        val first = provider.check(url)
+        val second = provider.check(url)
+
+        assertTrue(first.matched)
+        assertEquals(first, second)
+        assertEquals(1, requestCount)
+    }
+
+    @Test
+    fun `no threat match is reported as unmatched`() = runTest {
+        val engine = MockEngine { _ ->
+            respond(
+                content = ByteReadChannel("""{}"""),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = true
+            install(ContentNegotiation) { json() }
+        }
+        val client = SafeBrowsingClient(httpClient, apiKey = "test-key")
+        val provider = SafeBrowsingReputationProvider(client, ReputationCache())
+        val url = ScannedUrl(raw = "http://example.com", normalized = "http://example.com/", host = "example.com")
+
+        val result = provider.check(url)
+
+        assertEquals(false, result.matched)
+        assertTrue(result.checked)
+    }
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `./gradlew :data:test --tests "com.urlinspector.data.reputation.SafeBrowsingReputationProviderTest"`
+Expected: `BUILD FAILED` — `SafeBrowsingReputationProvider` is an
+unresolved reference.
+
+- [ ] **Step 3: Write minimal implementation**
+
+`data/src/main/kotlin/com/urlinspector/data/reputation/SafeBrowsingReputationProvider.kt`:
+
+```kotlin
+package com.urlinspector.data.reputation
+
+import com.urlinspector.core.ReputationProvider
+import com.urlinspector.core.model.ReputationResult
+import com.urlinspector.core.model.ScannedUrl
+import java.time.Instant
+
+class SafeBrowsingReputationProvider(
+    private val client: SafeBrowsingClient,
+    private val cache: ReputationCache,
+    override val id: String = "safe-browsing",
+    private val now: () -> Instant = Instant::now,
+) : ReputationProvider {
+
+    override suspend fun check(url: ScannedUrl): ReputationResult {
+        val cacheKey = url.normalized
+        val currentTime = now()
+
+        cache.get(cacheKey, currentTime)?.let { return it }
+
+        val matches = client.findThreatMatches(url.normalized)
+        val result = ReputationResult(matched = matches.isNotEmpty(), source = id, checked = true)
+
+        cache.put(cacheKey, result, currentTime)
+        return result
+    }
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `./gradlew :data:test --tests "com.urlinspector.data.reputation.SafeBrowsingReputationProviderTest"`
+Expected: `BUILD SUCCESSFUL`, 2 tests passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add data/src/main/kotlin/com/urlinspector/data/reputation/SafeBrowsingReputationProvider.kt data/src/test/kotlin/com/urlinspector/data/reputation/SafeBrowsingReputationProviderTest.kt
+git commit -m "feat(data): add SafeBrowsingReputationProvider wiring client + cache"
+```
+
+---
+
+### Task 16: `HttpUrlExpander` (implements `core.UrlExpander`)
+
+**Files:**
+- Create: `data/src/main/kotlin/com/urlinspector/data/expansion/HttpUrlExpander.kt`
+- Test: `data/src/test/kotlin/com/urlinspector/data/expansion/HttpUrlExpanderTest.kt`
+
+**Interfaces:**
+- Consumes: `core.UrlExpander`, `core.normalizeUrl`, `core.model.ScannedUrl`
+  (from `:core`, Tasks 3 and 9).
+- Produces: `HttpUrlExpander(httpClient: HttpClient) : UrlExpander`. Task
+  17's integration test constructs this directly.
+
+- [ ] **Step 1: Write the failing test**
+
+`data/src/test/kotlin/com/urlinspector/data/expansion/HttpUrlExpanderTest.kt`:
+
+```kotlin
+package com.urlinspector.data.expansion
+
+import com.urlinspector.core.model.ScannedUrl
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.headersOf
+import io.ktor.utils.io.ByteReadChannel
+import kotlinx.coroutines.test.runTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+class HttpUrlExpanderTest {
+
+    @Test
+    fun `follows a redirect chain to the final destination`() = runTest {
+        val engine = MockEngine { request ->
+            when (request.url.toString()) {
+                "http://bit.ly/abc123" -> respond(
+                    content = ByteReadChannel.Empty,
+                    status = HttpStatusCode.MovedPermanently,
+                    headers = headersOf(HttpHeaders.Location, "http://real-destination.example.com/"),
+                )
+                else -> respond(
+                    content = ByteReadChannel.Empty,
+                    status = HttpStatusCode.OK,
+                )
+            }
+        }
+        val httpClient = HttpClient(engine) { followRedirects = false }
+        val expander = HttpUrlExpander(httpClient)
+        val shortUrl = ScannedUrl(raw = "http://bit.ly/abc123", normalized = "http://bit.ly/abc123", host = "bit.ly")
+
+        val result = expander.expand(shortUrl)
+
+        assertEquals("real-destination.example.com", result.host)
+    }
+
+    @Test
+    fun `returns the same URL when there is no redirect`() = runTest {
+        val engine = MockEngine { _ ->
+            respond(content = ByteReadChannel.Empty, status = HttpStatusCode.OK)
+        }
+        val httpClient = HttpClient(engine) { followRedirects = false }
+        val expander = HttpUrlExpander(httpClient)
+        val url = ScannedUrl(raw = "http://example.com", normalized = "http://example.com/", host = "example.com")
+
+        val result = expander.expand(url)
+
+        assertEquals("example.com", result.host)
+    }
+}
+```
+
+Note: `followRedirects = false` on the `HttpClient` is required so a 3xx
+response surfaces to `HttpUrlExpander` instead of being transparently
+followed by Ktor's engine.
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `./gradlew :data:test --tests "com.urlinspector.data.expansion.HttpUrlExpanderTest"`
+Expected: `BUILD FAILED` — `HttpUrlExpander` is an unresolved reference.
+
+- [ ] **Step 3: Write minimal implementation**
+
+`data/src/main/kotlin/com/urlinspector/data/expansion/HttpUrlExpander.kt`:
+
+```kotlin
+package com.urlinspector.data.expansion
+
+import com.urlinspector.core.UrlExpander
+import com.urlinspector.core.normalizeUrl
+import com.urlinspector.core.model.ScannedUrl
+import io.ktor.client.HttpClient
+import io.ktor.client.request.head
+import io.ktor.client.statement.HttpResponse
+import io.ktor.http.HttpHeaders
+import io.ktor.http.isRedirect
+
+private const val MAX_REDIRECTS = 5
+
+class HttpUrlExpander(
+    private val httpClient: HttpClient,
+) : UrlExpander {
+
+    override suspend fun expand(url: ScannedUrl): ScannedUrl {
+        var current = url.normalized
+        repeat(MAX_REDIRECTS) {
+            val response: HttpResponse = httpClient.head(current)
+            if (!response.status.isRedirect()) {
+                return normalizeUrl(current) ?: url
+            }
+            val location = response.headers[HttpHeaders.Location] ?: return normalizeUrl(current) ?: url
+            current = location
+        }
+        return normalizeUrl(current) ?: url
+    }
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `./gradlew :data:test --tests "com.urlinspector.data.expansion.HttpUrlExpanderTest"`
+Expected: `BUILD SUCCESSFUL`, 2 tests passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add data/src/main/kotlin/com/urlinspector/data/expansion/HttpUrlExpander.kt data/src/test/kotlin/com/urlinspector/data/expansion/HttpUrlExpanderTest.kt
+git commit -m "feat(data): add HttpUrlExpander for shortener resolution"
+```
+
+---
+
+### Task 17: End-to-end integration test — `core.ScanUrlUseCase` over real M2 implementations
+
+**Files:**
+- Test: `data/src/test/kotlin/com/urlinspector/data/ScanUrlUseCaseIntegrationTest.kt`
+
+**Interfaces:**
+- Consumes: `core.ScanUrlUseCase`, `core.model.Verdict` (from `:core`,
+  Task 10), and every concrete `:data` implementation from Tasks 12, 15,
+  16 (`SqlDelightScanRepository`, `SafeBrowsingReputationProvider`,
+  `HttpUrlExpander`).
+- Produces: nothing new for other tasks — this is the M2 exit-criteria
+  proof that the M1 domain and M2 data layer compose correctly end to
+  end, per docs/spec.md's M2 exit criteria.
+
+- [ ] **Step 1: Write the test**
+
+`data/src/test/kotlin/com/urlinspector/data/ScanUrlUseCaseIntegrationTest.kt`:
+
+```kotlin
+package com.urlinspector.data
+
+import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import com.urlinspector.core.ScanUrlUseCase
+import com.urlinspector.core.model.Verdict
+import com.urlinspector.data.db.SqlDelightScanRepository
+import com.urlinspector.data.db.UrlInspectorDatabase
+import com.urlinspector.data.expansion.HttpUrlExpander
+import com.urlinspector.data.reputation.ReputationCache
+import com.urlinspector.data.reputation.SafeBrowsingClient
+import com.urlinspector.data.reputation.SafeBrowsingReputationProvider
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.headersOf
+import io.ktor.serialization.kotlinx.json.json
+import io.ktor.utils.io.ByteReadChannel
+import kotlinx.coroutines.test.runTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+class ScanUrlUseCaseIntegrationTest {
+
+    @Test
+    fun `a known-malicious URL is scanned end-to-end and persisted to real storage`() = runTest {
+        val reputationEngine = MockEngine { _ ->
+            respond(
+                content = ByteReadChannel("""{"matches":[{"threatType":"SOCIAL_ENGINEERING"}]}"""),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val reputationHttpClient = HttpClient(reputationEngine) {
+            expectSuccess = true
+            install(ContentNegotiation) { json() }
+        }
+        val reputationProvider = SafeBrowsingReputationProvider(
+            SafeBrowsingClient(reputationHttpClient, apiKey = "test-key"),
+            ReputationCache(),
+        )
+
+        val expanderEngine = MockEngine { _ -> respond(content = ByteReadChannel.Empty, status = HttpStatusCode.OK) }
+        val expanderHttpClient = HttpClient(expanderEngine) { followRedirects = false }
+        val urlExpander = HttpUrlExpander(expanderHttpClient)
+
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        UrlInspectorDatabase.Schema.create(driver)
+        val repository = SqlDelightScanRepository(UrlInspectorDatabase(driver))
+
+        val useCase = ScanUrlUseCase(reputationProvider, urlExpander, repository)
+
+        val result = useCase.scan("http://phishing.example.com/login")
+
+        assertEquals(Verdict.MALICIOUS, result.verdict)
+
+        val history = repository.getAll()
+        assertEquals(1, history.size)
+        assertEquals(Verdict.MALICIOUS, history.first().verdict)
+    }
+}
+```
+
+- [ ] **Step 2: Run it**
+
+Run: `./gradlew :data:test --tests "com.urlinspector.data.ScanUrlUseCaseIntegrationTest"`
+Expected: `BUILD SUCCESSFUL`, 1 test passed.
+
+- [ ] **Step 3: Run the full `:data` suite**
+
+Run: `./gradlew :data:test`
+Expected: `BUILD SUCCESSFUL`, all tests across Tasks 12-17 pass together
+(around 14 tests total in `:data`).
+
+- [ ] **Step 4: Run the whole project's tests**
+
+Run: `./gradlew test`
+Expected: `BUILD SUCCESSFUL` — `:core:test` (38 tests) and `:data:test`
+(the new tests) both green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add data/src/test/kotlin/com/urlinspector/data/ScanUrlUseCaseIntegrationTest.kt
+git commit -m "test(data): add end-to-end ScanUrlUseCase integration test over real M2 implementations"
+```
+
+---
+
+## Future Milestones (M3–M6, summary only — detailed per-task breakdown to follow when each is ready to start)
 
 ### M3 — Android UI & manual flow
 - **Goal**: user can manually paste a URL and see a verdict, backed by
