@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.urlinspector.core.ScanUrlUseCase
 import com.urlinspector.core.model.ScanResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -28,6 +29,8 @@ class ScanViewModel(
         viewModelScope.launch {
             _uiState.value = try {
                 ScanUiState.Success(scanUrlUseCase.scan(rawUrl))
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 ScanUiState.Error(e.message ?: "Invalid URL")
             }
