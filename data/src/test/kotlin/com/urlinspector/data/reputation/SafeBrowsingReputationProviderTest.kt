@@ -31,7 +31,7 @@ class SafeBrowsingReputationProviderTest {
         }
         val httpClient = HttpClient(engine) {
             expectSuccess = true
-            install(ContentNegotiation) { json() }
+            install(ContentNegotiation) { json(safeBrowsingJson) }
         }
         val client = SafeBrowsingClient(httpClient, apiKey = "test-key")
         val cache = ReputationCache()
@@ -58,7 +58,7 @@ class SafeBrowsingReputationProviderTest {
         }
         val httpClient = HttpClient(engine) {
             expectSuccess = true
-            install(ContentNegotiation) { json() }
+            install(ContentNegotiation) { json(safeBrowsingJson) }
         }
         val client = SafeBrowsingClient(httpClient, apiKey = "test-key")
         val provider = SafeBrowsingReputationProvider(client, ReputationCache())

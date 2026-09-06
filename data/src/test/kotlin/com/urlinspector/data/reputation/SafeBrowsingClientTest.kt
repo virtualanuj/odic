@@ -27,7 +27,7 @@ class SafeBrowsingClientTest {
         }
         val httpClient = HttpClient(engine) {
             expectSuccess = true
-            install(ContentNegotiation) { json() }
+            install(ContentNegotiation) { json(safeBrowsingJson) }
         }
         return SafeBrowsingClient(httpClient, apiKey = "test-key")
     }
@@ -49,6 +49,30 @@ class SafeBrowsingClientTest {
         val matches = client.findThreatMatches("http://example.com")
 
         assertTrue(matches.isEmpty())
+    }
+
+    @Test
+    fun `tolerates extra fields present in a real Safe Browsing response`() = runTest {
+        val client = clientWith(
+            """
+            {
+              "matches": [
+                {
+                  "threatType": "MALWARE",
+                  "platformType": "ANY_PLATFORM",
+                  "threatEntryType": "URL",
+                  "threat": {"url": "http://malicious.example.com/"},
+                  "cacheDuration": "300.000s"
+                }
+              ]
+            }
+            """.trimIndent(),
+        )
+
+        val matches = client.findThreatMatches("http://malicious.example.com")
+
+        assertEquals(1, matches.size)
+        assertEquals("MALWARE", matches.first().threatType)
     }
 
     @Test

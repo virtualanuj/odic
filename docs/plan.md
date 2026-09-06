@@ -2385,6 +2385,16 @@ git commit -m "test(data): add end-to-end ScanUrlUseCase integration test over r
 - **Blocked on**: Android SDK installation (not yet present on this
   machine) and the `core` → true KMP conversion noted in Global
   Constraints above.
+- **Inherits from M2**: the DI wiring that constructs `HttpClient` instances
+  for `:data` must (a) `install(HttpTimeout)` with a bounded request timeout
+  — M2 deliberately built `SafeBrowsingClient`/`HttpUrlExpander` with no
+  client-level timeout, relying entirely on `core.ScanUrlUseCase`'s
+  `withTimeoutOrNull` wrapper, which only protects callers that go through
+  `ScanUrlUseCase` (any other consumer of these classes directly has no
+  bound); (b) construct two separately-configured `HttpClient` instances,
+  one with `followRedirects = false` for `HttpUrlExpander` and one with
+  `ContentNegotiation`/`expectSuccess = true` for `SafeBrowsingClient` — see
+  the KDoc on each class in `:data`.
 
 ### M4 — Share-sheet integration
 - **Goal**: links shared from WhatsApp/Messages open directly to a

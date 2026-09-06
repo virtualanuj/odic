@@ -39,6 +39,29 @@ class HttpUrlExpanderTest {
     }
 
     @Test
+    fun `resolves a relative Location header against the current URL`() = runTest {
+        val engine = MockEngine { request ->
+            when (request.url.toString()) {
+                "http://bit.ly/abc123" -> respond(
+                    content = ByteReadChannel.Empty,
+                    status = HttpStatusCode.MovedPermanently,
+                    headers = headersOf(HttpHeaders.Location, "/final-page"),
+                )
+                "http://bit.ly/final-page" -> respond(content = ByteReadChannel.Empty, status = HttpStatusCode.OK)
+                else -> respond(content = ByteReadChannel.Empty, status = HttpStatusCode.NotFound)
+            }
+        }
+        val httpClient = HttpClient(engine) { followRedirects = false }
+        val expander = HttpUrlExpander(httpClient)
+        val shortUrl = ScannedUrl(raw = "http://bit.ly/abc123", normalized = "http://bit.ly/abc123", host = "bit.ly")
+
+        val result = expander.expand(shortUrl)
+
+        assertEquals("bit.ly", result.host)
+        assertEquals("http://bit.ly/final-page", result.normalized)
+    }
+
+    @Test
     fun `returns the same URL when there is no redirect`() = runTest {
         val engine = MockEngine { _ ->
             respond(content = ByteReadChannel.Empty, status = HttpStatusCode.OK)

@@ -7,10 +7,21 @@ import io.ktor.client.HttpClient
 import io.ktor.client.request.head
 import io.ktor.client.statement.HttpResponse
 import io.ktor.http.HttpHeaders
+import java.net.URI
 
 private const val MAX_REDIRECTS = 5
 private val REDIRECT_STATUS_RANGE = 300..399
 
+/**
+ * Follows a bounded chain of HTTP redirects (e.g. to resolve a shortened URL)
+ * via HEAD requests. The [HttpClient] passed in here MUST be constructed with
+ * `followRedirects = false` — otherwise the underlying engine transparently
+ * follows 3xx responses itself, and this class never observes them (it will
+ * always report "no redirect"). This is a different client configuration than
+ * [com.urlinspector.data.reputation.SafeBrowsingClient] needs (which requires
+ * ContentNegotiation + expectSuccess = true) — a caller wiring up DI (M3) must
+ * construct two separately-configured HttpClient instances, not share one.
+ */
 class HttpUrlExpander(
     private val httpClient: HttpClient,
 ) : UrlExpander {
@@ -23,7 +34,7 @@ class HttpUrlExpander(
                 return normalizeUrl(current) ?: url
             }
             val location = response.headers[HttpHeaders.Location] ?: return normalizeUrl(current) ?: url
-            current = location
+            current = URI(current).resolve(location).toString()
         }
         return normalizeUrl(current) ?: url
     }
