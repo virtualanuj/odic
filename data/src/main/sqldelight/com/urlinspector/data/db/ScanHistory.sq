@@ -1,0 +1,19 @@
+CREATE TABLE ScanHistoryRow (
+    id TEXT NOT NULL PRIMARY KEY,
+    url TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    scannedAt INTEGER NOT NULL
+);
+
+insertEntry:
+INSERT INTO ScanHistoryRow(id, url, verdict, scannedAt)
+VALUES (?, ?, ?, ?);
+
+selectAll:
+SELECT * FROM ScanHistoryRow ORDER BY scannedAt DESC;
+
+deleteById:
+DELETE FROM ScanHistoryRow WHERE id = ?;
+
+deleteAll:
+DELETE FROM ScanHistoryRow;
