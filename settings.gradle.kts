@@ -11,3 +11,4 @@ plugins {
 rootProject.name = "url-inspector"
 
 include(":core")
+include(":data")
