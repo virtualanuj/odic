@@ -11,6 +11,7 @@ import com.urlinspector.core.model.ScanHistoryEntry
 import com.urlinspector.core.model.ScanResult
 import com.urlinspector.core.model.ScannedUrl
 import com.urlinspector.core.model.Verdict
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
@@ -101,6 +102,8 @@ class ScanUrlUseCase(
         val result = withTimeoutOrNull(reputationTimeoutMillis) {
             try {
                 reputationProvider.check(url)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 null
             }
