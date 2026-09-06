@@ -10,7 +10,7 @@ android {
     defaultConfig {
         applicationId = "com.urlinspector.app"
         minSdk = 26
-        targetSdk = 37
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
     }
