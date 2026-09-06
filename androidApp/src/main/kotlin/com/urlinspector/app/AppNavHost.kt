@@ -1,5 +1,6 @@
 package com.urlinspector.app
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -44,12 +45,14 @@ fun AppNavHost(
         composable(ROUTE_VERDICT) {
             val state = uiState
             if (state is ScanUiState.Success) {
+                val onVerdictBack: () -> Unit = {
+                    scanViewModel.reset()
+                    navController.popBackStack(ROUTE_PASTE, inclusive = false)
+                }
+                BackHandler(onBack = onVerdictBack)
                 VerdictScreen(
                     result = state.result,
-                    onBack = {
-                        scanViewModel.reset()
-                        navController.popBackStack(ROUTE_PASTE, inclusive = false)
-                    },
+                    onBack = onVerdictBack,
                     onOpenLink = onOpenLink,
                 )
             }
