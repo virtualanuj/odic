@@ -9,6 +9,7 @@
     <application
         android:name=".UrlInspectorApp"
         android:allowBackup="false"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:label="URL Inspector"
         android:theme="@style/Theme.UrlInspector">
         <activity
