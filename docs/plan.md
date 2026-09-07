@@ -13,12 +13,13 @@ referenced throughout).
 
 This document currently carries a fully detailed, bite-sized task
 breakdown for **M0 (project scaffolding), M1 (core domain), M2 (data
-layer), M3 (Android UI & manual flow), M4 (share-sheet integration), and
-M5 (opt-in SMS scanning)**. The Android SDK, `adb`, and an emulator
-(`url_inspector_avd`, API 35) are now installed on the development
-machine, so M3/M4/M5 are buildable and runnable, not just planned.
-M6 is kept as a milestone-level summary at the end; it gets the same
-bite-sized treatment in its own pass once it's ready to start.
+layer), M3 (Android UI & manual flow), M4 (share-sheet integration), M5
+(opt-in SMS scanning), and M6 (hardening & release readiness)**. The
+Android SDK, `adb`, and an emulator (`url_inspector_avd`, API 35) are
+now installed on the development machine, so M3-M6 are buildable and
+runnable, not just planned. M6 is the last planned milestone in this
+document — see spec.md §15 for iOS follow-up, documented but not
+implemented.
 
 ## Global Constraints
 
@@ -5315,15 +5316,575 @@ met on a real running emulator, not just in unit tests.
 
 ---
 
-## Future Milestones (M6, summary only — detailed per-task breakdown to follow when it is ready to start)
+## M6 Global Constraints
 
-### M6 — Hardening & release readiness
-- **Goal**: production-ready build.
-- **Touches**: error/offline fallback paths (spec.md §13 Error Handling)
-  exercised across all entry points, full instrumented test pass
-  (spec.md §14 Testing Strategy), security review of permissions and
-  data handling (spec.md §12 Permissions & Security), release build/
-  signing config.
-- **Exit criteria**: all tests (unit + instrumented) green; manual QA pass
-  on the three user flows from intent.md §3 with network on and off;
-  release build installs and runs on a target device.
+These bind Tasks 37-42 below.
+
+- **Scope decisions confirmed with the user before this pass began**
+  (mirrors the scope-narrowing pattern already used in M3/M4/M5 — stated
+  explicitly rather than silently assumed):
+  - **No production signing keystore.** M6 configures a `release`
+    `buildType` (minification/shrinking, ProGuard rules) but does NOT
+    generate or reference a real Play-Store signing identity — that is a
+    decision only the app's owner can make (organization identity,
+    key-rotation policy, Play Console enrollment), not something to
+    invent. The `release` build in this pass is signed with the debug
+    signing config purely so `assembleRelease`/`installRelease` can be
+    built and smoke-tested; this is explicitly documented as NOT
+    production-ready signing, with a `TODO` marking the follow-up.
+  - **No instrumented (`androidTest`) test suite.** spec.md §14 calls for
+    Android instrumented tests; this project has relied on real
+    on-device/emulator manual verification instead at every milestone
+    since M3, and that established precedent continues for M6 rather
+    than introducing a first instrumented-test investment this late.
+    "Full instrumented test pass" is satisfied here by the on-device
+    verification in Task 42, not by new `androidTest` code.
+  - **Safe Browsing API key: mechanism only, key stays empty.** Task 38
+    moves the key out of a hardcoded Kotlin constant into
+    `local.properties`/`BuildConfig` (real secrets-management hygiene —
+    never committed, never hardcoded), but no real key value is supplied
+    in this pass. The DR2 heuristics-only fallback behavior already
+    built and tested in M2 is unchanged; this task is purely about
+    *how* the key would reach the app when one is eventually supplied.
+- **Reuses from M1-M5, do not reimplement**: `core.ScanUrlUseCase`'s
+  `runGuarded`/timeout/DR2-fallback machinery (already the mechanism
+  behind every "offline"/error-path requirement in spec.md §13 — already
+  unit-tested in `ScanUrlUseCaseTest` for both the MALICIOUS-verdict path
+  and the reputation-timeout-falls-back-to-heuristics path); the existing
+  `ScanViewModel`/`SmsScanCoordinator` exception-boundary patterns
+  (`catch (e: CancellationException) { throw e }` before a broader
+  catch) established across M3-M5 — Task 40 audits for gaps against this
+  existing pattern, it does not invent a new one.
+- **Verdict-rendering note**: the MALICIOUS verdict's on-device visual
+  presentation (color/label in `VerdictScreen`) cannot be exercised
+  end-to-end without a real Safe Browsing API key returning a genuine
+  threat match — since M6 keeps the key empty (see above), this stays
+  covered by `ScanUrlUseCaseTest`'s existing unit-level verification
+  only, not a new on-device check. Revisit once a real key is supplied.
+- Dependency versions: no new dependencies are required for Tasks 37-41.
+  R8/minification uses AGP's bundled tooling; `kotlinx.serialization`,
+  Ktor, SQLDelight, and Koin all ship their own consumer ProGuard rules
+  in their published artifacts — Task 39 adds a minimal project-level
+  `proguard-rules.pro` defensively and, critically, *empirically verifies*
+  the release build actually runs (R8 misconfiguration is a classic
+  build-succeeds-but-crashes-at-runtime failure mode that no amount of
+  reading consumer-rules.pro files substitutes for).
+- Out of scope for M6: iOS work (spec.md §15, explicitly a future
+  follow-up), a real production signing identity (see above), RCS
+  scanning changes (already out of scope since M5), any new user-facing
+  feature.
+
+---
+
+## M6 — Hardening & Release Readiness: Detailed Tasks
+
+### Task 37: Network security config
+
+**Files:**
+- Create: `androidApp/src/main/res/xml/network_security_config.xml`
+- Modify: `androidApp/src/main/AndroidManifest.xml`
+
+**Interfaces:** none (manifest/resource-only change, no code consumes
+this).
+
+spec.md §12 explicitly calls for "Android network security config
+disallowing cleartext" as part of this app's security posture. Android
+already defaults to disallowing cleartext for apps targeting API 28+
+(this app's `targetSdk = 35` already gets that default), but an explicit
+config makes the policy auditable or reversible for a specific domain
+rather than resting entirely on a platform default — the honest,
+documented version of what spec.md asks for.
+
+This task has no automated test (a manifest/XML resource change) —
+verified by `assembleDebug` succeeding and, since there is no code path
+to exercise, that is sufficient; Task 42's on-device pass additionally
+confirms real HTTPS traffic (Safe Browsing lookups) still works
+correctly with this config in place.
+
+- [ ] **Step 1: Write `network_security_config.xml`**
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
+```
+
+- [ ] **Step 2: Reference it from the manifest**
+
+Add `android:networkSecurityConfig="@xml/network_security_config"` to the
+`<application>` tag in `AndroidManifest.xml`, alongside the existing
+`android:allowBackup="false"` etc. attributes:
+
+```xml
+    <application
+        android:name=".UrlInspectorApp"
+        android:allowBackup="false"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:label="URL Inspector"
+        android:theme="@style/Theme.UrlInspector">
+```
+
+- [ ] **Step 3: Verify it builds**
+
+Run: `./gradlew :androidApp:assembleDebug`
+Expected: BUILD SUCCESSFUL.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add androidApp/src/main/res/xml/network_security_config.xml \
+        androidApp/src/main/AndroidManifest.xml
+git commit -m "feat(androidApp): add explicit network security config disallowing cleartext"
+```
+
+---
+
+### Task 38: Safe Browsing API key via `local.properties`/`BuildConfig`
+
+**Files:**
+- Modify: `androidApp/build.gradle.kts`
+- Modify: `androidApp/src/main/kotlin/com/urlinspector/app/di/AppModule.kt`
+- Modify: `local.properties` (gitignored — this task documents the key,
+  it does not commit one)
+
+**Interfaces:**
+- Consumes: nothing new.
+- Produces: `BuildConfig.SAFE_BROWSING_API_KEY: String` (generated by
+  AGP from the `buildConfigField` declared in this task), consumed by
+  `AppModule.kt` in place of the current hardcoded empty-string constant.
+
+This task has no automated test — it is Gradle build-config plumbing.
+Verified by `assembleDebug` succeeding and by confirming (via the
+generated `BuildConfig.java`/Kotlin source, or simply by reasoning about
+the fallback default) that an absent/empty key in `local.properties`
+still produces an empty string at runtime — i.e., this task must not
+change DR2's existing empty-key-falls-back-to-heuristics behavior,
+already covered by M2's `ScanUrlUseCaseTest`/`SafeBrowsingClientTest`.
+
+- [ ] **Step 1: Enable `buildConfig` and read the key from `local.properties`**
+
+Modify `androidApp/build.gradle.kts`. Add this near the top, before the
+`android { }` block:
+
+```kotlin
+import java.util.Properties
+
+val localProperties = Properties().apply {
+    val localPropertiesFile = rootProject.file("local.properties")
+    if (localPropertiesFile.exists()) {
+        localPropertiesFile.inputStream().use { load(it) }
+    }
+}
+```
+
+Inside the existing `android { }` block, add:
+
+```kotlin
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
+
+    defaultConfig {
+        applicationId = "com.urlinspector.app"
+        minSdk = 26
+        targetSdk = 35
+        versionCode = 1
+        versionName = "1.0"
+        buildConfigField(
+            "String",
+            "SAFE_BROWSING_API_KEY",
+            "\"${localProperties.getProperty("safeBrowsingApiKey", "")}\"",
+        )
+    }
+```
+
+(This adds `buildConfigField(...)` and the second `buildFeatures.buildConfig
+= true` line to the EXISTING `defaultConfig`/`buildFeatures` blocks —
+read the current file first and merge into them, don't create duplicate
+blocks.)
+
+- [ ] **Step 2: Document the key in `local.properties`**
+
+Append to the (gitignored) `local.properties` file — this is a local,
+uncommitted convenience for development, not a secret being committed:
+
+```properties
+# Optional: a real Google Safe Browsing v4 API key. Leave unset/empty to
+# keep the app's existing heuristics-only fallback behavior (DR2).
+safeBrowsingApiKey=
+```
+
+- [ ] **Step 3: Consume it from `AppModule.kt`**
+
+Replace:
+
+```kotlin
+// TODO(future milestone): real key provisioning (build config / secrets
+// management) is out of scope for M3. An empty key means every reputation
+// lookup fails (400/403), which ScanUrlUseCase.runGuarded already turns
+// into a graceful heuristics-only fallback — this is intended, working
+// DR2 behavior for now, not a bug.
+private const val SAFE_BROWSING_API_KEY = ""
+```
+
+with:
+
+```kotlin
+// Real key provisioning: supply `safeBrowsingApiKey=...` in the
+// (gitignored) local.properties file — see androidApp/build.gradle.kts's
+// buildConfigField wiring. An empty/absent key means every reputation
+// lookup fails (400/403), which ScanUrlUseCase.runGuarded already turns
+// into a graceful heuristics-only fallback — this is intended, working
+// DR2 behavior, not a bug.
+private val SAFE_BROWSING_API_KEY = BuildConfig.SAFE_BROWSING_API_KEY
+```
+
+Add the import `import com.urlinspector.app.BuildConfig` at the top of
+`AppModule.kt` (AGP generates this class in the app's own package at
+build time from the `applicationId`/`namespace`, `com.urlinspector.app`).
+
+- [ ] **Step 4: Verify it builds**
+
+Run: `./gradlew :androidApp:assembleDebug`
+Expected: BUILD SUCCESSFUL, with `local.properties`'s
+`safeBrowsingApiKey` left empty — confirm the generated
+`BuildConfig.SAFE_BROWSING_API_KEY` is `""` by inspecting
+`androidApp/build/generated/source/buildConfig/debug/com/urlinspector/app/BuildConfig.java`
+(or the equivalent Kotlin-generated path — AGP 9.x may generate either;
+check whichever exists) after the build.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add androidApp/build.gradle.kts androidApp/src/main/kotlin/com/urlinspector/app/di/AppModule.kt
+git commit -m "feat(androidApp): move Safe Browsing API key to BuildConfig/local.properties"
+```
+
+(Do not `git add local.properties` — it is gitignored; if your `git add`
+step attempts to stage it and git refuses/ignores it, that is correct
+and expected, not an error.)
+
+---
+
+### Task 39: Release build type — minification, shrinking, ProGuard rules
+
+**Files:**
+- Modify: `androidApp/build.gradle.kts`
+- Create: `androidApp/proguard-rules.pro`
+
+**Interfaces:** none new — this task must not change any public
+class/function signature; its entire job is making the EXISTING code
+survive R8 minification unchanged.
+
+No automated test — verified by `./gradlew :androidApp:assembleRelease`
+succeeding (build-time proof) AND, critically, by Task 42's on-device
+install-and-smoke-test of the actual release APK (the only real proof
+R8 didn't silently break something at runtime — a build that compiles
+under R8 can still crash on first launch if a reflection-dependent class
+got stripped).
+
+- [ ] **Step 1: Add the `release` build type**
+
+Modify `androidApp/build.gradle.kts`'s `android { }` block, adding a
+`buildTypes { }` block (a sibling of the existing `defaultConfig { }`
+and `compileOptions { }` blocks):
+
+```kotlin
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            // TODO(follow-up, not part of M6): this reuses the debug
+            // signing config purely so assembleRelease/installRelease can
+            // be built and smoke-tested on a development machine. This is
+            // NOT a production signing identity — before any real
+            // distribution (Play Store or otherwise), replace this with a
+            // real release signingConfig backed by a properly-secured
+            // keystore (never committed to source control).
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+```
+
+- [ ] **Step 2: Write `proguard-rules.pro`**
+
+```proguard
+# kotlinx.serialization: the plugin generates serializers at compile time
+# (not reflection-based), and the library ships its own consumer rules,
+# but keep the DTOs' Companion objects explicitly as defense in depth —
+# R8 has historically had edge cases around synthetic $serializer classes
+# when aggressive optimization is combined with shrinking.
+-keepclassmembers class com.urlinspector.data.reputation.** {
+    *** Companion;
+}
+-keepclasseswithmembers class com.urlinspector.data.reputation.** {
+    kotlinx.serialization.KSerializer serializer(...);
+}
+
+# SQLDelight-generated database/query classes are constructed reflectively
+# in a few internal paths; keep the generated package intact.
+-keep class com.urlinspector.data.db.** { *; }
+
+# Koin builds its dependency graph via a DSL, not reflection, but keep
+# the DI module's declared types' constructors reachable defensively.
+-keepclassmembers class com.urlinspector.app.** {
+    public <init>(...);
+}
+```
+
+- [ ] **Step 3: Verify the release build actually compiles and packages**
+
+Run: `./gradlew :androidApp:assembleRelease`
+Expected: BUILD SUCCESSFUL, producing
+`androidApp/build/outputs/apk/release/androidApp-release.apk`.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add androidApp/build.gradle.kts androidApp/proguard-rules.pro
+git commit -m "feat(androidApp): add release build type with R8 minification and ProGuard rules"
+```
+
+(Task 42 is where this release APK actually gets installed and
+exercised on-device — this task's own scope stops at "it builds.")
+
+---
+
+### Task 40: Exception-boundary hardening audit
+
+**Files:**
+- Modify: `androidApp/src/main/kotlin/com/urlinspector/app/LinkOpener.kt`
+- Modify: `androidApp/src/main/kotlin/com/urlinspector/app/scan/PasteScreen.kt`
+
+**Interfaces:**
+- Consumes: nothing new.
+- Produces: `fun Activity.openExternalLink(url: String)` keeps its exact
+  signature; its body changes to fail safely instead of crashing.
+
+spec.md §13 requires: "Any uncaught exception in the detection pipeline
+is caught at the use case boundary and surfaced as a generic 'scan
+failed, try again' state rather than crashing the host Activity/Service."
+`core.ScanUrlUseCase`, `ScanViewModel`, and `SmsScanCoordinator` already
+satisfy this (verified in M1/M3/M5's own reviews) — this task closes the
+one remaining gap found during this audit: `openExternalLink` calls
+`startActivity(Intent(ACTION_VIEW, ...))` with no guard, which throws
+`ActivityNotFoundException` and crashes the host Activity on any device
+with no browser/handler installed for the URL's scheme (rare on a real
+phone, but a real crash path — the emulator image happens to always have
+Chrome, which is exactly why this was never caught by earlier on-device
+QA).
+
+- [ ] **Step 1: Write the failing test**
+
+`Activity`-scoped extension functions can't be unit-tested without an
+Android framework/Robolectric dependency this project doesn't have (same
+established limitation as every other Activity-glue file in this
+codebase — see M3/M4/M5's own task briefs for this exact reasoning).
+Skip to Step 2; this is verified by code review + Task 42's on-device
+pass instead.
+
+- [ ] **Step 2: Guard `openExternalLink` against a missing handler**
+
+Replace the full contents of `LinkOpener.kt`:
+
+```kotlin
+package com.urlinspector.app
+
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
+
+fun Activity.openExternalLink(url: String) {
+    try {
+        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    } catch (e: ActivityNotFoundException) {
+        Toast.makeText(this, "No app found to open this link", Toast.LENGTH_SHORT).show()
+    }
+}
+```
+
+- [ ] **Step 3: Verify it builds**
+
+Run: `./gradlew :androidApp:assembleDebug`
+Expected: BUILD SUCCESSFUL.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add androidApp/src/main/kotlin/com/urlinspector/app/LinkOpener.kt
+git commit -m "fix(androidApp): guard openExternalLink against ActivityNotFoundException"
+```
+
+(No `PasteScreen.kt` change is actually required by this task — it was
+listed above as a candidate during planning but the audit found no
+additional gap there; if your own reading of the current file confirms
+this, leave it untouched and note that in your report rather than
+making a speculative change.)
+
+---
+
+### Task 41: Security review pass
+
+**Files:** none required (a review task; any findings it surfaces get
+fixed as part of this task's own fix loop, files TBD by what's found).
+
+This task is a deliberate, structured security review of the whole
+`androidApp` (plus a light pass over `core`/`data` for anything
+security-relevant), covering exactly what spec.md §12 calls for:
+
+- [ ] **Step 1: Review permissions**
+
+Confirm (read `AndroidManifest.xml`): `INTERNET` (always), `READ_SMS`/
+`POST_NOTIFICATIONS`/`FOREGROUND_SERVICE`/`FOREGROUND_SERVICE_SPECIAL_USE`
+(SMS-scanning-related, all requested only via the M5 opt-in flow, never
+at first launch — verify by re-reading `SettingsScreen.kt`'s permission
+request call site, not just the manifest declaration). No permission
+should be present that isn't justified by a specific, traceable feature.
+
+- [ ] **Step 2: Review data handling**
+
+Confirm: no SMS message body, no scan URL's full response body, and no
+API key value is ever passed to `android.util.Log`/`println` anywhere in
+`androidApp`, `core`, or `data` (grep for `Log\.` and `println` across
+all three `src/main` trees — expect zero hits, matching M5's own
+established finding). Confirm `ScanHistoryEntry` persists only URL,
+verdict, and timestamp (re-read `core/model/Models.kt` — no behavior
+change expected, just confirmation). Confirm `android:allowBackup="false"`
+is still present in the manifest (the M3 Critical fix — regression-check
+it hasn't drifted).
+
+- [ ] **Step 3: Review build/secrets hygiene**
+
+Confirm `local.properties` is listed in `.gitignore` (it must already
+be, since `sdk.dir` has lived there since M3 — this step is a
+regression-check, not new work). Confirm Task 38's `safeBrowsingApiKey`
+plumbing never ends up in a committed file, a log statement, or a
+`BuildConfig` field that's readable by anything other than this app's
+own process (it isn't — `BuildConfig` fields compile into the APK's
+`.dex`, decompilable like any local secret baked into a client app; note
+this as an inherent limitation of client-side API keys, not a defect
+introduced by this task — a server-side proxy would be the real fix, and
+is out of scope).
+
+- [ ] **Step 4: Review network security**
+
+Confirm Task 37's network security config is present and correctly
+referenced. Confirm both `HttpClient` instances in `AppModule.kt`
+(`REPUTATION_HTTP_CLIENT`, `EXPANDER_HTTP_CLIENT`) use `https://` base
+URLs / correctly-scoped redirect policy (re-read `SafeBrowsingClient.kt`'s
+`DEFAULT_BASE_URL` and `HttpUrlExpander.kt` — regression-check, no
+change expected).
+
+- [ ] **Step 5: Record findings and fix**
+
+If this review surfaces any real finding (something a step above didn't
+already predict as "expected, no change"), fix it as part of this same
+task — write the fix, verify with the relevant existing test suite or
+`assembleDebug`, and note it explicitly in your task report. If the
+review comes back clean (all of Steps 1-4 confirm existing, correct
+behavior with no drift), that is a valid, complete outcome for this
+task — report it as such rather than manufacturing a finding.
+
+- [ ] **Step 6: Commit** (only if Step 5 produced a fix; skip if clean)
+
+```bash
+git add <whatever files Step 5's fix touched>
+git commit -m "fix(androidApp): <describe the specific security finding fixed>"
+```
+
+---
+
+### Task 42: Final on-device release-build verification
+
+**Files:** none (verification only, no source changes).
+
+This task has no code changes and needs no `task-reviewer` code-quality
+pass — it is the milestone's actual exit-criteria proof, reported the
+same way M3's Task 25, M4's Task 29, and M5's Task 36 were.
+
+- [ ] **Step 1: Build and install the RELEASE (not debug) APK**
+
+```bash
+./gradlew :androidApp:installRelease
+```
+
+Expected: succeeds (proves Task 39's R8/minification setup produces an
+installable APK, not just a compiling one).
+
+- [ ] **Step 2: Launch and smoke-test the manual paste flow**
+
+```bash
+adb shell am start -n com.urlinspector.app/.MainActivity
+```
+
+Paste a URL, tap Scan, confirm the verdict screen renders correctly (no
+crash, no missing-class R8 stripping artifact). Confirm "Open link
+anyway" opens a browser without crashing (Task 40's regression target).
+Confirm "View scan history" renders correctly. Screenshot each step.
+
+- [ ] **Step 3: Smoke-test the share-sheet flow**
+
+```bash
+adb shell am start -a android.intent.action.SEND -t text/plain \
+  --es android.intent.extra.TEXT "https://example.com/release-test" \
+  -n com.urlinspector.app/.ShareHandlerActivity
+```
+
+Confirm it opens directly to the verdict screen (M4's flow, now under
+R8). Screenshot.
+
+- [ ] **Step 4: Smoke-test the SMS-scanning opt-in flow**
+
+Navigate to Settings, toggle SMS scanning on, grant permissions, confirm
+the foreground service starts (`adb shell dumpsys activity services
+com.urlinspector.app` shows `isForeground=true`). Send a test SMS via
+`adb emu sms send 5551234567 "release test: https://example.com/sms-release-test"`
+and confirm a notification appears and its tap opens the verdict screen
+(M5's flow, now under R8). Toggle off afterward. Screenshot.
+
+- [ ] **Step 5: Smoke-test the offline/error fallback path**
+
+```bash
+adb shell svc wifi disable
+adb shell svc data disable
+```
+
+Scan a URL manually. Expected: the verdict screen still renders (from
+heuristics alone), showing the "Reputation check could not be
+completed — showing on-device checks only" DR2 message (spec.md §13's
+explicit requirement) rather than hanging or crashing. Screenshot. Then
+restore connectivity:
+
+```bash
+adb shell svc wifi enable
+adb shell svc data enable
+```
+
+- [ ] **Step 6: Confirm the debug test suite is still green**
+
+```bash
+./gradlew test testDebugUnitTest
+```
+
+Expected: BUILD SUCCESSFUL, all suites passing (this final run is the
+"all tests green" half of M6's exit criteria — the release-build smoke
+test in Steps 1-5 is the "manual QA pass on the three user flows...
+release build installs and runs on a target device" half).
+
+No commit needed for this task (no source changes) — report the outcome
+directly: which steps passed, any screenshots taken, and confirmation
+that M6's exit criteria (docs/plan.md's own M6 goal, spec.md §12/§13/§14
+as scoped by this milestone's Global Constraints) are met on a real
+release build running on a real emulator, not just compiled.
