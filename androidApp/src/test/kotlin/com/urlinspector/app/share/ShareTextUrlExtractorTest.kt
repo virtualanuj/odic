@@ -60,4 +60,30 @@ class ShareTextUrlExtractorTest {
     fun `returns null for blank text`() {
         assertNull(extractFirstUrl("   "))
     }
+
+    @Test
+    fun `extractUrls finds all URLs in text`() {
+        assertEquals(
+            listOf("http://a.example.com", "https://b.example.com"),
+            extractUrls("http://a.example.com and also https://b.example.com"),
+        )
+    }
+
+    @Test
+    fun `extractUrls returns a single-element list for one URL`() {
+        assertEquals(
+            listOf("https://example.com/page"),
+            extractUrls("Look at (https://example.com/page)."),
+        )
+    }
+
+    @Test
+    fun `extractUrls returns empty list when no URL is present`() {
+        assertEquals(emptyList(), extractUrls("no link in this text"))
+    }
+
+    @Test
+    fun `extractUrls returns empty list for blank text`() {
+        assertEquals(emptyList(), extractUrls("   "))
+    }
 }
