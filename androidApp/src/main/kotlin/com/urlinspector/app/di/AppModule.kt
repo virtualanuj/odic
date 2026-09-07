@@ -8,6 +8,8 @@ import com.urlinspector.core.ScanUrlUseCase
 import com.urlinspector.core.UrlExpander
 import com.urlinspector.app.history.HistoryViewModel
 import com.urlinspector.app.scan.ScanViewModel
+import com.urlinspector.app.settings.ScanPreferences
+import com.urlinspector.app.settings.SharedPreferencesScanPreferences
 import com.urlinspector.data.db.SqlDelightScanRepository
 import com.urlinspector.data.db.UrlInspectorDatabase
 import com.urlinspector.data.expansion.HttpUrlExpander
@@ -66,6 +68,11 @@ val appModule = module {
         val context: Context = get()
         val driver = AndroidSqliteDriver(UrlInspectorDatabase.Schema, context, "url_inspector.db")
         UrlInspectorDatabase(driver)
+    }
+
+    single<ScanPreferences> {
+        val context: Context = get()
+        SharedPreferencesScanPreferences(context)
     }
 
     single<ScanRepository> { SqlDelightScanRepository(get()) }
