@@ -13,10 +13,11 @@ referenced throughout).
 
 This document currently carries a fully detailed, bite-sized task
 breakdown for **M0 (project scaffolding), M1 (core domain), M2 (data
-layer), and M3 (Android UI & manual flow)**. The Android SDK, `adb`, and
-an emulator (`url_inspector_avd`, API 35) are now installed on the
-development machine, so M3 is buildable and runnable, not just planned.
-M4–M6 are kept as milestone-level summaries at the end; each gets the
+layer), M3 (Android UI & manual flow), and M4 (share-sheet
+integration)**. The Android SDK, `adb`, and an emulator
+(`url_inspector_avd`, API 35) are now installed on the development
+machine, so M3/M4 are buildable and runnable, not just planned.
+M5–M6 are kept as milestone-level summaries at the end; each gets the
 same bite-sized treatment in its own pass once it's ready to start.
 
 ## Global Constraints
@@ -3645,15 +3646,457 @@ unit tests.
 
 ---
 
-## Future Milestones (M4–M6, summary only — detailed per-task breakdown to follow when each is ready to start)
+## M4 Global Constraints
 
-### M4 — Share-sheet integration
-- **Goal**: links shared from WhatsApp/Messages open directly to a
-  verdict.
-- **Touches**: `androidApp` — share-target registration + handling
-  screen (spec.md §8 Platform Integration), reusing M3's verdict screen.
-- **Exit criteria**: sharing a link from WhatsApp/Messages into the app
-  shows the correct verdict; instrumented test covers this path.
+These bind Tasks 26-29 below.
+
+- **No new detection logic**: M4 is pure platform/UI plumbing on top of
+  M1-M3. It must not modify `:core` or `:data` — it only adds a new
+  Android entry point (`ShareHandlerActivity`) and reuses the existing
+  `ScanViewModel` / `ScanUrlUseCase` / `VerdictScreen` / `PasteScreen`
+  exactly as M3 built them.
+- **Base package / toolchain**: same as M3 — `com.urlinspector.app`,
+  `minSdk = 26`, `compileSdk = 37`, `targetSdk = 35`, Kotlin/Java 17,
+  same dependency versions already declared in `androidApp/build.gradle.kts`
+  (no new dependencies are needed for M4).
+- **Share-text extraction is heuristic, not validation**: incoming
+  `EXTRA_TEXT` from a real share (WhatsApp, Messages, Chrome, etc.) is
+  arbitrary human/app-generated text, e.g. `"Check this out:
+  https://example.com/x"` or a bare URL. Extraction finds the first
+  `http`/`https` substring and trims common trailing punctuation
+  (`.` `,` `)` `]` `}` `!` `?` `;` `:` `'` `"`). It does **not** validate
+  the URL — that job belongs entirely to `core.UrlNormalizer` /
+  `ScanUrlUseCase`, which M4 must not duplicate or bypass.
+- **No detected URL fallback**: if no `http`/`https` substring is found
+  in the shared text, `ShareHandlerActivity` must not crash, silently
+  drop the share, or auto-scan garbage — it opens the paste screen with
+  the raw shared text pre-filled into the input field so the user can
+  fix/complete it manually.
+- **Scan triggers at most once per share**: auto-scanning must not
+  re-fire on recomposition or configuration change (e.g. rotation) —
+  gate it on `ScanUiState` being `Idle`, the same guard pattern already
+  used for `Loading`/`Success` transitions elsewhere in `AppNavHost`.
+- **Out of scope for M4** (per docs/plan.md's own prior scope notes):
+  SMS scanning (M5), release/signing config (M6), and — continuing M3's
+  explicit scope-narrowing decision — Compose UI instrumented
+  (`androidTest`) tests. Verification is via (a) plain JVM unit tests
+  for the one piece of new branching logic (URL extraction) and (b) a
+  real on-device share-intent run in Task 29, same pattern as M3's
+  Task 25.
+
+---
+
+## M4 — Share-sheet Integration: Detailed Tasks
+
+### Task 26: Share-text URL extraction utility
+
+**Files:**
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/share/ShareTextUrlExtractor.kt`
+- Test: `androidApp/src/test/kotlin/com/urlinspector/app/share/ShareTextUrlExtractorTest.kt`
+
+**Interfaces:**
+- Consumes: nothing (pure Kotlin, no Android/core/data dependencies).
+- Produces: `fun extractFirstUrl(text: String): String?` — used by Task 28's
+  `ShareHandlerActivity`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```kotlin
+package com.urlinspector.app.share
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNull
+
+class ShareTextUrlExtractorTest {
+
+    @Test
+    fun `extracts a bare URL`() {
+        assertEquals("https://example.com", extractFirstUrl("https://example.com"))
+    }
+
+    @Test
+    fun `extracts a URL with leading surrounding text`() {
+        assertEquals(
+            "https://example.com/x",
+            extractFirstUrl("Check this out: https://example.com/x"),
+        )
+    }
+
+    @Test
+    fun `extracts a URL with trailing surrounding text`() {
+        assertEquals(
+            "http://example.com/page",
+            extractFirstUrl("See http://example.com/page for details"),
+        )
+    }
+
+    @Test
+    fun `trims trailing punctuation not part of the URL`() {
+        assertEquals(
+            "https://example.com/page",
+            extractFirstUrl("Look at (https://example.com/page)."),
+        )
+    }
+
+    @Test
+    fun `preserves a query string`() {
+        assertEquals(
+            "https://example.com/page?q=1&r=2",
+            extractFirstUrl("https://example.com/page?q=1&r=2 nice right?"),
+        )
+    }
+
+    @Test
+    fun `returns the first URL when multiple are present`() {
+        assertEquals(
+            "http://a.example.com",
+            extractFirstUrl("http://a.example.com and also https://b.example.com"),
+        )
+    }
+
+    @Test
+    fun `returns null when no URL is present`() {
+        assertNull(extractFirstUrl("no link in this text"))
+    }
+
+    @Test
+    fun `returns null for blank text`() {
+        assertNull(extractFirstUrl("   "))
+    }
+}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `./gradlew :androidApp:testDebugUnitTest --tests "com.urlinspector.app.share.ShareTextUrlExtractorTest"`
+Expected: FAIL with "unresolved reference: extractFirstUrl" (file doesn't exist yet).
+
+- [ ] **Step 3: Write the implementation**
+
+```kotlin
+package com.urlinspector.app.share
+
+private val URL_REGEX = Regex("""https?://\S+""")
+private val TRAILING_PUNCTUATION = charArrayOf('.', ',', ')', ']', '}', '!', '?', ';', ':', '\'', '"')
+
+/**
+ * Finds the first http(s) URL substring in arbitrary shared text (e.g. a
+ * WhatsApp/Messages share payload like "Check this out: https://...").
+ * Returns null if no URL substring is present. Does not validate the URL —
+ * that is core.UrlNormalizer's job once the extracted string reaches
+ * ScanUrlUseCase.
+ */
+fun extractFirstUrl(text: String): String? {
+    val match = URL_REGEX.find(text) ?: return null
+    return match.value.trimEnd(*TRAILING_PUNCTUATION).ifBlank { null }
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `./gradlew :androidApp:testDebugUnitTest --tests "com.urlinspector.app.share.ShareTextUrlExtractorTest"`
+Expected: PASS (8 tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add androidApp/src/main/kotlin/com/urlinspector/app/share/ShareTextUrlExtractor.kt \
+        androidApp/src/test/kotlin/com/urlinspector/app/share/ShareTextUrlExtractorTest.kt
+git commit -m "feat(androidApp): add share-text URL extraction utility"
+```
+
+---
+
+### Task 27: `AppNavHost` support for auto-scan and prefill
+
+**Files:**
+- Modify: `androidApp/src/main/kotlin/com/urlinspector/app/AppNavHost.kt`
+- Modify: `androidApp/src/main/kotlin/com/urlinspector/app/scan/PasteScreen.kt`
+
+**Interfaces:**
+- Consumes: `ScanViewModel.uiState`/`scan()` (Task 20, already exists),
+  `PasteScreen` (Task 21, already exists).
+- Produces: `AppNavHost(onOpenLink, navController, scanViewModel,
+  sharedUrl: String? = null, prefillText: String? = null)` — the two new
+  trailing params default to `null` so `MainActivity`'s existing call
+  (`AppNavHost(onOpenLink = ::openLink)`) is unaffected. `PasteScreen`
+  gains `initialText: String = ""`. Used by Task 28's
+  `ShareHandlerActivity`.
+
+This task has no new automated tests of its own (Composable
+navigation/state wiring — same category M3 already established is
+verified by compilation + the real on-device pass, not blind
+instrumented tests). Verify via `assembleDebug` and manual reasoning
+about the two new code paths; Task 29 proves both paths for real.
+
+- [ ] **Step 1: Add `initialText` to `PasteScreen`**
+
+In `PasteScreen.kt`, change the signature and initial state:
+
+```kotlin
+@Composable
+fun PasteScreen(
+    uiState: ScanUiState,
+    onScan: (String) -> Unit,
+    onOpenHistory: () -> Unit,
+    modifier: Modifier = Modifier,
+    initialText: String = "",
+) {
+    var urlText by rememberSaveable { mutableStateOf(initialText) }
+    // ... rest of the function body is unchanged
+```
+
+- [ ] **Step 2: Wire auto-scan and prefill into `AppNavHost`**
+
+In `AppNavHost.kt`, change the function signature and the `ROUTE_PASTE`
+composable:
+
+```kotlin
+@Composable
+fun AppNavHost(
+    onOpenLink: (String) -> Unit,
+    navController: NavHostController = rememberNavController(),
+    scanViewModel: ScanViewModel = koinViewModel(),
+    sharedUrl: String? = null,
+    prefillText: String? = null,
+) {
+    val uiState by scanViewModel.uiState.collectAsState()
+
+    LaunchedEffect(sharedUrl) {
+        if (sharedUrl != null && uiState is ScanUiState.Idle) {
+            scanViewModel.scan(sharedUrl)
+        }
+    }
+
+    NavHost(navController = navController, startDestination = ROUTE_PASTE) {
+        composable(ROUTE_PASTE) {
+            PasteScreen(
+                uiState = uiState,
+                onScan = { url -> scanViewModel.scan(url) },
+                onOpenHistory = { navController.navigate(ROUTE_HISTORY) },
+                initialText = prefillText ?: "",
+            )
+            LaunchedEffect(uiState) {
+                if (uiState is ScanUiState.Success) {
+                    navController.navigate(ROUTE_VERDICT)
+                }
+            }
+        }
+        // ... ROUTE_VERDICT and ROUTE_HISTORY composables unchanged
+```
+
+The `LaunchedEffect(sharedUrl)` sits above `NavHost` and is keyed on
+`sharedUrl` (stable per-Activity — `ShareHandlerActivity` creates one
+`AppNavHost` per share intent), so it fires once on first composition
+and never again on rotation. The `uiState is ScanUiState.Idle` guard
+means that even if the effect were somehow re-run, it would not
+re-trigger a scan once one is in flight or complete — the same
+belt-and-suspenders pattern as the existing `LaunchedEffect(uiState)`
+below it.
+
+- [ ] **Step 3: Verify it compiles**
+
+Run: `./gradlew :androidApp:assembleDebug`
+Expected: BUILD SUCCESSFUL.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add androidApp/src/main/kotlin/com/urlinspector/app/AppNavHost.kt \
+        androidApp/src/main/kotlin/com/urlinspector/app/scan/PasteScreen.kt
+git commit -m "feat(androidApp): support auto-scan and text prefill in AppNavHost"
+```
+
+---
+
+### Task 28: `ShareHandlerActivity` and manifest registration
+
+**Files:**
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/LinkOpener.kt`
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/ShareHandlerActivity.kt`
+- Modify: `androidApp/src/main/kotlin/com/urlinspector/app/MainActivity.kt`
+- Modify: `androidApp/src/main/AndroidManifest.xml`
+
+**Interfaces:**
+- Consumes: `extractFirstUrl` (Task 26), `AppNavHost(..., sharedUrl,
+  prefillText)` (Task 27).
+- Produces: nothing further consumed by later tasks — this is the
+  milestone's user-facing entry point. Task 29 verifies it on-device.
+
+- [ ] **Step 1: Extract the shared link-opening helper**
+
+Both `MainActivity` and `ShareHandlerActivity` need to open a URL in the
+browser (`VerdictScreen`'s "Open link anyway"). Pull the duplicate logic
+out into one file:
+
+```kotlin
+package com.urlinspector.app
+
+import android.app.Activity
+import android.content.Intent
+import android.net.Uri
+
+fun Activity.openExternalLink(url: String) {
+    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+}
+```
+
+- [ ] **Step 2: Update `MainActivity` to use the shared helper**
+
+In `MainActivity.kt`, remove the private `openLink` method and its
+`Intent`/`Uri` imports, and change the `AppNavHost` call:
+
+```kotlin
+AppNavHost(onOpenLink = { url -> openExternalLink(url) })
+```
+
+- [ ] **Step 3: Write `ShareHandlerActivity`**
+
+```kotlin
+package com.urlinspector.app
+
+import android.content.Intent
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.ui.Modifier
+import com.urlinspector.app.share.extractFirstUrl
+
+class ShareHandlerActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+
+        val sharedText = if (intent?.action == Intent.ACTION_SEND) {
+            intent.getStringExtra(Intent.EXTRA_TEXT)
+        } else {
+            null
+        }
+        val extractedUrl = sharedText?.let(::extractFirstUrl)
+
+        setContent {
+            MaterialTheme {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .windowInsetsPadding(WindowInsets.safeDrawing),
+                ) {
+                    AppNavHost(
+                        onOpenLink = { url -> openExternalLink(url) },
+                        sharedUrl = extractedUrl,
+                        prefillText = if (extractedUrl == null) sharedText else null,
+                    )
+                }
+            }
+        }
+    }
+}
+```
+
+- [ ] **Step 4: Register the activity with a `SEND`/`text/plain` intent-filter**
+
+In `AndroidManifest.xml`, add a second `<activity>` inside
+`<application>`, alongside the existing `MainActivity` entry:
+
+```xml
+        <activity
+            android:name=".ShareHandlerActivity"
+            android:exported="true"
+            android:label="Scan with URL Inspector"
+            android:theme="@style/Theme.UrlInspector">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+```
+
+- [ ] **Step 5: Verify it builds**
+
+Run: `./gradlew :androidApp:assembleDebug`
+Expected: BUILD SUCCESSFUL.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add androidApp/src/main/kotlin/com/urlinspector/app/LinkOpener.kt \
+        androidApp/src/main/kotlin/com/urlinspector/app/ShareHandlerActivity.kt \
+        androidApp/src/main/kotlin/com/urlinspector/app/MainActivity.kt \
+        androidApp/src/main/AndroidManifest.xml
+git commit -m "feat(androidApp): add ShareHandlerActivity for share-sheet integration"
+```
+
+---
+
+### Task 29: On-device/emulator verification
+
+**Files:** none (verification only, no source changes).
+
+This task has no code changes and needs no `task-reviewer` code-quality
+pass — it is a manual verification pass, reported the same way M3's
+Task 25 was.
+
+- [ ] **Step 1: Build and install the debug APK**
+
+```bash
+./gradlew :androidApp:installDebug
+```
+
+- [ ] **Step 2: Simulate a WhatsApp/Messages-style share with a URL present**
+
+```bash
+adb shell am start -a android.intent.action.SEND -t text/plain \
+  --es android.intent.extra.TEXT "Check this out: https://example.com/test-path" \
+  -n com.urlinspector.app/.ShareHandlerActivity
+```
+
+Expected: the app opens directly to the verdict screen for
+`https://example.com/test-path` (no manual "Scan" tap needed). Confirm
+with a screenshot (`adb exec-out screencap -p`).
+
+- [ ] **Step 3: Simulate a share with no URL in the text**
+
+```bash
+adb shell am start -a android.intent.action.SEND -t text/plain \
+  --es android.intent.extra.TEXT "just some notes, no link" \
+  -n com.urlinspector.app/.ShareHandlerActivity
+```
+
+Expected: the paste screen opens with "just some notes, no link"
+pre-filled in the input field, Scan button enabled, no crash. Confirm
+with a screenshot.
+
+- [ ] **Step 4: Confirm the share-triggered scan is recorded in history**
+
+From the verdict screen reached in Step 2, navigate back to Paste, then
+"View scan history" — confirm the `example.com/test-path` entry is
+present (reusing the same `ScanRepository` M3 already wired). Confirm
+with a screenshot.
+
+- [ ] **Step 5: Confirm `MainActivity`'s own flow is unaffected**
+
+Launch normally (`adb shell am start -n
+com.urlinspector.app/.MainActivity`), paste a URL, scan it, and confirm
+"Open link anyway" still opens the browser — proves the `LinkOpener`
+extraction in Task 28 didn't regress the existing path.
+
+No commit needed for this task (no source changes) — report the outcome
+directly: which steps passed, any screenshots taken, and confirmation
+that the M4 exit criteria (docs/plan.md's M4 goal / docs/spec.md §8)
+are met on a real running emulator, not just in unit tests.
+
+---
+
+## Future Milestones (M5–M6, summary only — detailed per-task breakdown to follow when each is ready to start)
 
 ### M5 — Opt-in SMS scanning
 - **Goal**: optional proactive detection of links in incoming SMS/RCS.
