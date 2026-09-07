@@ -13,12 +13,12 @@ referenced throughout).
 
 This document currently carries a fully detailed, bite-sized task
 breakdown for **M0 (project scaffolding), M1 (core domain), M2 (data
-layer), M3 (Android UI & manual flow), and M4 (share-sheet
-integration)**. The Android SDK, `adb`, and an emulator
+layer), M3 (Android UI & manual flow), M4 (share-sheet integration), and
+M5 (opt-in SMS scanning)**. The Android SDK, `adb`, and an emulator
 (`url_inspector_avd`, API 35) are now installed on the development
-machine, so M3/M4 are buildable and runnable, not just planned.
-M5–M6 are kept as milestone-level summaries at the end; each gets the
-same bite-sized treatment in its own pass once it's ready to start.
+machine, so M3/M4/M5 are buildable and runnable, not just planned.
+M6 is kept as a milestone-level summary at the end; it gets the same
+bite-sized treatment in its own pass once it's ready to start.
 
 ## Global Constraints
 
@@ -4096,17 +4096,1226 @@ are met on a real running emulator, not just in unit tests.
 
 ---
 
-## Future Milestones (M5–M6, summary only — detailed per-task breakdown to follow when each is ready to start)
+## M5 Global Constraints
 
-### M5 — Opt-in SMS scanning
-- **Goal**: optional proactive detection of links in incoming SMS/RCS.
-- **Touches**: `androidApp` — settings toggle, SMS permission flow,
-  inbox observer (spec.md §8 Platform Integration), detected-link
-  notification.
-- **Exit criteria**: with the toggle on and permission granted, an
-  incoming SMS containing a URL produces a notification with the correct
-  verdict; toggling off or revoking permission stops scanning (verified
-  by instrumented test).
+These bind Tasks 30-36 below.
+
+- **Design decisions locked in for M5** (per spec.md §8's "decide during
+  implementation" note):
+  - Observation mechanism: `READ_SMS` permission + a `ContentObserver` on
+    `Telephony.Sms.CONTENT_URI` — **not** `RECEIVE_SMS`/a
+    `BroadcastReceiver`, and **not** becoming the default SMS app (that
+    would require implementing a full SMS compose/send/MMS stack, wildly
+    out of scope for an opt-in security feature). This matches spec.md
+    §8's explicit wording ("register a `ContentObserver` on
+    `content://sms`").
+  - Persistence mechanism: a **foreground `Service`**, not `WorkManager`.
+    `WorkManager`'s minimum periodic interval (15 minutes) cannot deliver
+    "when a new inbound message arrives" in near-real-time, which is the
+    whole point of the feature. A foreground service with a visible,
+    low-priority ongoing notification is the standard, honest pattern for
+    "this app is actively watching something in the background" on modern
+    Android, and is what keeps the process (and the `ContentObserver`
+    registration) alive against Doze/background-execution limits.
+  - Scope boundary: **no boot-persistence** (`RECEIVE_BOOT_COMPLETED` /
+    auto-restart after device reboot) — the service starts only when the
+    user turns the Settings toggle on in this app session, and that is a
+    deliberate scope-narrowing decision, not an oversight. Revisit if a
+    future milestone needs "always on across reboots."
+- **Permissions this milestone adds** (all requested only when the user
+  opts in, never at first launch, per intent.md §6 and spec.md §12):
+  `READ_SMS` (runtime, dangerous), `POST_NOTIFICATIONS` (runtime,
+  API 33+ only — required to show the per-message scan-result
+  notifications), `FOREGROUND_SERVICE` and
+  `FOREGROUND_SERVICE_SPECIAL_USE` (normal, manifest-only, needed because
+  `targetSdk = 35` requires every foreground service to declare a
+  `android:foregroundServiceType`, and "observing an SMS content
+  provider" doesn't map to any of the standard typed categories like
+  `dataSync`/`location`/`mediaPlayback` — `specialUse` is the documented
+  catch-all for exactly this case, and it requires a
+  `PROPERTY_SPECIAL_USE_FGS_SUBTYPE` manifest `<property>` describing the
+  use case in the `<service>` block).
+- **Reuses from M1-M4, do not reimplement**: `core.ScanUrlUseCase.scan()`
+  (already normalizes, scans, and saves to history — SMS-detected URLs
+  go through the exact same pipeline as manual paste and share-sheet
+  URLs); `androidApp.share.extractFirstUrl`/`extractUrls` (Task 30
+  generalizes the existing M4 extractor rather than duplicating regex
+  logic); `ShareHandlerActivity` (Task 33's notification tap reuses it
+  by constructing a synthetic `ACTION_SEND`/`EXTRA_TEXT` intent — the
+  exact same entry point WhatsApp/Messages already use, so tapping a
+  notification gets the identical auto-scan-to-verdict behavior M4 built
+  and already fixed the rotation/duplicate-scan bug for).
+- **Privacy (intent.md §7, spec.md §12, binding)**: only extracted URLs
+  are ever sent off-device (to the reputation provider) or persisted (as
+  `ScanHistoryEntry.url`); full SMS message bodies are read into memory
+  transiently to extract URLs and are never logged, persisted, or
+  transmitted. Do not add any logging statement that prints a message
+  body.
+- **Verdict on "revoking permission stops scanning"**: the plan's own M5
+  summary requires this to be verified. Two mechanisms cover it: (a) the
+  Settings screen re-checks `READ_SMS` on every resume and force-disables
+  the toggle (stopping the service) if the OS-level permission no longer
+  matches the persisted "enabled" state; (b) the service's own
+  `ContentObserver` query is wrapped in a `try/catch (SecurityException)`
+  that calls `stopSelf()` if a query fails after revocation, so scanning
+  stops immediately rather than waiting for the user to reopen Settings.
+- Dependency versions: no new dependencies are required — `androidx.core`
+  (`NotificationCompat`/`NotificationManagerCompat`, already pulled in via
+  `androidx.core:core-ktx:1.19.0`) and `androidx.activity`
+  (`ActivityResultContracts`, already pulled in via
+  `androidx.activity:activity-compose:1.13.0`) already cover everything
+  this milestone needs.
+- Out of scope for M5: RCS-specific handling (RCS messages that arrive
+  via Google Messages' RCS transport are not exposed through
+  `content://sms` — this milestone covers SMS only, matching what's
+  actually implementable via the public `Telephony.Sms` provider),
+  release/signing config (M6), boot-persistence (see above).
+
+---
+
+## M5 — Opt-in SMS Scanning: Detailed Tasks
+
+### Task 30: Generalize the URL extractor to `extractUrls` (multi-URL)
+
+**Files:**
+- Modify: `androidApp/src/main/kotlin/com/urlinspector/app/share/ShareTextUrlExtractor.kt`
+- Modify: `androidApp/src/test/kotlin/com/urlinspector/app/share/ShareTextUrlExtractorTest.kt`
+
+**Interfaces:**
+- Consumes: nothing new.
+- Produces: `fun extractUrls(text: String): List<String>` (new). Existing
+  `fun extractFirstUrl(text: String): String?` (from M4, used by
+  `ShareHandlerActivity`) keeps its exact signature and behavior, now
+  implemented in terms of `extractUrls`. Task 32 consumes `extractUrls`.
+
+- [ ] **Step 1: Write the failing test for `extractUrls`**
+
+Add these test cases to the existing `ShareTextUrlExtractorTest` class
+(keep all existing tests for `extractFirstUrl` — they must still pass
+unmodified):
+
+```kotlin
+    @Test
+    fun `extractUrls finds all URLs in text`() {
+        assertEquals(
+            listOf("http://a.example.com", "https://b.example.com"),
+            extractUrls("http://a.example.com and also https://b.example.com"),
+        )
+    }
+
+    @Test
+    fun `extractUrls returns a single-element list for one URL`() {
+        assertEquals(
+            listOf("https://example.com/page"),
+            extractUrls("Look at (https://example.com/page)."),
+        )
+    }
+
+    @Test
+    fun `extractUrls returns empty list when no URL is present`() {
+        assertEquals(emptyList(), extractUrls("no link in this text"))
+    }
+
+    @Test
+    fun `extractUrls returns empty list for blank text`() {
+        assertEquals(emptyList(), extractUrls("   "))
+    }
+```
+
+- [ ] **Step 2: Run tests to verify the new ones fail**
+
+Run: `./gradlew :androidApp:testDebugUnitTest --tests "com.urlinspector.app.share.ShareTextUrlExtractorTest"`
+Expected: the 4 new tests FAIL with "unresolved reference: extractUrls";
+all pre-existing tests still pass.
+
+- [ ] **Step 3: Implement `extractUrls` and reimplement `extractFirstUrl` on top of it**
+
+Replace the full contents of `ShareTextUrlExtractor.kt` with:
+
+```kotlin
+package com.urlinspector.app.share
+
+private val URL_REGEX = Regex("""https?://\S+""")
+private val TRAILING_PUNCTUATION = charArrayOf('.', ',', ')', ']', '}', '!', '?', ';', ':', '\'', '"')
+
+/**
+ * Finds every http(s) URL substring in arbitrary text (a shared payload,
+ * or an SMS message body). Does not validate the URLs — that is
+ * core.UrlNormalizer's job once a candidate reaches ScanUrlUseCase.
+ */
+fun extractUrls(text: String): List<String> =
+    URL_REGEX.findAll(text)
+        .map { it.value.trimEnd(*TRAILING_PUNCTUATION) }
+        .toList()
+
+/**
+ * Finds the first http(s) URL substring in arbitrary shared text (e.g. a
+ * WhatsApp/Messages share payload like "Check this out: https://...").
+ * Returns null if no URL substring is present.
+ */
+fun extractFirstUrl(text: String): String? = extractUrls(text).firstOrNull()
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `./gradlew :androidApp:testDebugUnitTest --tests "com.urlinspector.app.share.ShareTextUrlExtractorTest"`
+Expected: PASS (12 tests total — 8 pre-existing `extractFirstUrl` tests +
+4 new `extractUrls` tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add androidApp/src/main/kotlin/com/urlinspector/app/share/ShareTextUrlExtractor.kt \
+        androidApp/src/test/kotlin/com/urlinspector/app/share/ShareTextUrlExtractorTest.kt
+git commit -m "feat(androidApp): generalize URL extraction to support multiple URLs"
+```
+
+---
+
+### Task 31: `ScanPreferences` — SMS-scanning opt-in flag storage
+
+**Files:**
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/settings/ScanPreferences.kt`
+- Modify: `androidApp/src/main/kotlin/com/urlinspector/app/di/AppModule.kt`
+
+**Interfaces:**
+- Consumes: Android `Context` (for `SharedPreferences`), already
+  available in Koin's DI graph (see `AppModule.kt`'s existing
+  `single { val context: Context = get(); ... }` pattern for the
+  database).
+- Produces: `interface ScanPreferences { val smsScanningEnabled:
+  StateFlow<Boolean>; fun setSmsScanningEnabled(enabled: Boolean) }` and
+  its real implementation `SharedPreferencesScanPreferences`, bound as a
+  Koin `single<ScanPreferences>`. Consumed by Task 35's
+  `SettingsViewModel`.
+
+This task has no automated test of its own — it's a thin
+`SharedPreferences` wrapper (Android framework glue), following the same
+established precedent as M3/M4's Activity/Manifest tasks: verified by
+compilation and a later on-device task (Task 36), not a unit test that
+would just be re-testing `SharedPreferences` itself.
+
+- [ ] **Step 1: Write `ScanPreferences.kt`**
+
+```kotlin
+package com.urlinspector.app.settings
+
+import android.content.Context
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+private const val PREFS_NAME = "url_inspector_settings"
+private const val KEY_SMS_SCANNING_ENABLED = "sms_scanning_enabled"
+
+interface ScanPreferences {
+    val smsScanningEnabled: StateFlow<Boolean>
+    fun setSmsScanningEnabled(enabled: Boolean)
+}
+
+class SharedPreferencesScanPreferences(context: Context) : ScanPreferences {
+    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    private val _smsScanningEnabled = MutableStateFlow(
+        prefs.getBoolean(KEY_SMS_SCANNING_ENABLED, false),
+    )
+    override val smsScanningEnabled: StateFlow<Boolean> = _smsScanningEnabled.asStateFlow()
+
+    override fun setSmsScanningEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_SMS_SCANNING_ENABLED, enabled).apply()
+        _smsScanningEnabled.value = enabled
+    }
+}
+```
+
+Note the default is `false` (off), satisfying FR3's "off by default"
+requirement — `getBoolean(KEY_SMS_SCANNING_ENABLED, false)` is the single
+source of truth for that default.
+
+- [ ] **Step 2: Wire it into `AppModule.kt`**
+
+Add this Koin binding (place it near the other `single { ... }`
+declarations, after the database binding is a reasonable spot):
+
+```kotlin
+    single<ScanPreferences> {
+        val context: Context = get()
+        SharedPreferencesScanPreferences(context)
+    }
+```
+
+Add the import: `import com.urlinspector.app.settings.ScanPreferences`
+and `import com.urlinspector.app.settings.SharedPreferencesScanPreferences`.
+
+- [ ] **Step 3: Verify it compiles**
+
+Run: `./gradlew :androidApp:assembleDebug`
+Expected: BUILD SUCCESSFUL.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add androidApp/src/main/kotlin/com/urlinspector/app/settings/ScanPreferences.kt \
+        androidApp/src/main/kotlin/com/urlinspector/app/di/AppModule.kt
+git commit -m "feat(androidApp): add ScanPreferences for SMS-scanning opt-in flag"
+```
+
+---
+
+### Task 32: `SmsScanCoordinator` — the testable core of SMS scanning
+
+**Files:**
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/sms/ScanNotifier.kt`
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/sms/SmsScanCoordinator.kt`
+- Test: `androidApp/src/test/kotlin/com/urlinspector/app/sms/SmsScanCoordinatorTest.kt`
+
+**Interfaces:**
+- Consumes: `core.ScanUrlUseCase.scan(rawUrl: String): ScanResult` (throws
+  `core.InvalidUrlException` on an unparseable URL — already exists),
+  `androidApp.share.extractUrls(text: String): List<String>` (Task 30).
+- Produces: `interface ScanNotifier { fun notify(url: String, verdict:
+  Verdict) }` and `class SmsScanCoordinator(scanUrlUseCase: ScanUrlUseCase,
+  notifier: ScanNotifier) { suspend fun processMessageBody(body: String) }`.
+  Task 33 provides the real `ScanNotifier` implementation
+  (`AndroidScanNotifier`). Task 34's `SmsContentObserverService` is
+  `SmsScanCoordinator`'s only caller.
+
+This is the one piece of real branching logic in this milestone's SMS
+pipeline — it gets full unit test coverage with fakes, the same pattern
+`ScanViewModelTest` established in M3.
+
+- [ ] **Step 1: Write `ScanNotifier.kt`**
+
+```kotlin
+package com.urlinspector.app.sms
+
+import com.urlinspector.core.model.Verdict
+
+interface ScanNotifier {
+    fun notify(url: String, verdict: Verdict)
+}
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+```kotlin
+package com.urlinspector.app.sms
+
+import com.urlinspector.app.fakes.FakeReputationProvider
+import com.urlinspector.app.fakes.FakeScanRepository
+import com.urlinspector.app.fakes.FakeUrlExpander
+import com.urlinspector.core.ScanUrlUseCase
+import com.urlinspector.core.model.Verdict
+import kotlinx.coroutines.test.runTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+private class FakeScanNotifier : ScanNotifier {
+    data class Notification(val url: String, val verdict: Verdict)
+    val notifications = mutableListOf<Notification>()
+
+    override fun notify(url: String, verdict: Verdict) {
+        notifications.add(Notification(url, verdict))
+    }
+}
+
+class SmsScanCoordinatorTest {
+
+    private fun coordinator(notifier: FakeScanNotifier): SmsScanCoordinator {
+        val scanUrlUseCase = ScanUrlUseCase(
+            reputationProvider = FakeReputationProvider(),
+            urlExpander = FakeUrlExpander(),
+            scanRepository = FakeScanRepository(),
+        )
+        return SmsScanCoordinator(scanUrlUseCase, notifier)
+    }
+
+    @Test
+    fun `scans and notifies for a single URL in the message`() = runTest {
+        val notifier = FakeScanNotifier()
+        coordinator(notifier).processMessageBody("Your package: https://example.com/track")
+
+        assertEquals(1, notifier.notifications.size)
+        assertEquals("https://example.com/track", notifier.notifications[0].url)
+        assertEquals(Verdict.SAFE, notifier.notifications[0].verdict)
+    }
+
+    @Test
+    fun `scans and notifies for each URL when multiple are present`() = runTest {
+        val notifier = FakeScanNotifier()
+        coordinator(notifier).processMessageBody("https://a.example.com and https://b.example.com")
+
+        assertEquals(2, notifier.notifications.size)
+    }
+
+    @Test
+    fun `does nothing for a message with no URL`() = runTest {
+        val notifier = FakeScanNotifier()
+        coordinator(notifier).processMessageBody("Your OTP is 123456")
+
+        assertEquals(0, notifier.notifications.size)
+    }
+
+    @Test
+    fun `does not crash and does not notify when the extracted candidate is not a valid URL`() = runTest {
+        val notifier = FakeScanNotifier()
+        // "https://" extracts as a URL-shaped substring but has no host,
+        // so core.UrlNormalizer rejects it — ScanUrlUseCase throws
+        // InvalidUrlException, which the coordinator must swallow.
+        coordinator(notifier).processMessageBody("weird link: https://")
+
+        assertEquals(0, notifier.notifications.size)
+    }
+}
+```
+
+- [ ] **Step 3: Run tests to verify they fail**
+
+Run: `./gradlew :androidApp:testDebugUnitTest --tests "com.urlinspector.app.sms.SmsScanCoordinatorTest"`
+Expected: FAIL with "unresolved reference: SmsScanCoordinator".
+
+- [ ] **Step 4: Write `SmsScanCoordinator.kt`**
+
+```kotlin
+package com.urlinspector.app.sms
+
+import com.urlinspector.app.share.extractUrls
+import com.urlinspector.core.InvalidUrlException
+import com.urlinspector.core.ScanUrlUseCase
+import kotlinx.coroutines.CancellationException
+
+class SmsScanCoordinator(
+    private val scanUrlUseCase: ScanUrlUseCase,
+    private val notifier: ScanNotifier,
+) {
+    suspend fun processMessageBody(body: String) {
+        for (url in extractUrls(body)) {
+            try {
+                val result = scanUrlUseCase.scan(url)
+                notifier.notify(result.finalUrl.normalized, result.verdict)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: InvalidUrlException) {
+                // The extracted candidate looked URL-shaped but wasn't
+                // actually valid (e.g. no host) — skip it silently rather
+                // than notifying about garbage.
+            }
+        }
+    }
+}
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `./gradlew :androidApp:testDebugUnitTest --tests "com.urlinspector.app.sms.SmsScanCoordinatorTest"`
+Expected: PASS (4/4).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add androidApp/src/main/kotlin/com/urlinspector/app/sms/ScanNotifier.kt \
+        androidApp/src/main/kotlin/com/urlinspector/app/sms/SmsScanCoordinator.kt \
+        androidApp/src/test/kotlin/com/urlinspector/app/sms/SmsScanCoordinatorTest.kt
+git commit -m "feat(androidApp): add SmsScanCoordinator for SMS URL scan+notify pipeline"
+```
+
+---
+
+### Task 33: Notification channels + `AndroidScanNotifier`
+
+**Files:**
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/sms/NotificationChannels.kt`
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/sms/AndroidScanNotifier.kt`
+- Modify: `androidApp/src/main/kotlin/com/urlinspector/app/UrlInspectorApp.kt`
+
+**Interfaces:**
+- Consumes: `ScanNotifier` (Task 32), `ShareHandlerActivity` (M4, reused
+  as the notification-tap target).
+- Produces: `object NotificationChannels` with `CHANNEL_ID_STATUS` /
+  `CHANNEL_ID_RESULTS` constants and a `fun ensureCreated(context:
+  Context)`; `class AndroidScanNotifier(context: Context) : ScanNotifier`.
+  Task 34's `SmsContentObserverService` uses both.
+
+No automated test — this is Android notification/framework glue,
+verified by compilation and Task 36's on-device pass (a real posted
+notification is the only meaningful proof this works).
+
+- [ ] **Step 1: Write `NotificationChannels.kt`**
+
+```kotlin
+package com.urlinspector.app.sms
+
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.Context
+import android.os.Build
+import androidx.core.content.getSystemService
+
+object NotificationChannels {
+    const val CHANNEL_ID_STATUS = "sms_scan_status"
+    const val CHANNEL_ID_RESULTS = "sms_scan_results"
+
+    fun ensureCreated(context: Context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+
+        val manager: NotificationManager = context.getSystemService() ?: return
+
+        manager.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_ID_STATUS,
+                "SMS scanning status",
+                NotificationManager.IMPORTANCE_MIN,
+            ).apply {
+                description = "Shows while URL Inspector is watching incoming SMS messages for links."
+            },
+        )
+
+        manager.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_ID_RESULTS,
+                "SMS link scan results",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply {
+                description = "A link was found in an SMS message and scanned."
+            },
+        )
+    }
+}
+```
+
+- [ ] **Step 2: Call it from `UrlInspectorApp.onCreate()`**
+
+Modify `UrlInspectorApp.kt` — add the call after `startKoin { ... }`:
+
+```kotlin
+package com.urlinspector.app
+
+import android.app.Application
+import com.urlinspector.app.di.appModule
+import com.urlinspector.app.sms.NotificationChannels
+import org.koin.android.ext.koin.androidContext
+import org.koin.core.context.startKoin
+
+class UrlInspectorApp : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        startKoin {
+            androidContext(this@UrlInspectorApp)
+            modules(appModule)
+        }
+        NotificationChannels.ensureCreated(this)
+    }
+}
+```
+
+Channels must exist before any notification (including the foreground
+service's own status notification, Task 34) is posted — creating them
+unconditionally at app startup (a no-op if they already exist — channel
+creation is idempotent) is simpler and safer than creating them lazily
+at first use.
+
+- [ ] **Step 3: Write `AndroidScanNotifier.kt`**
+
+```kotlin
+package com.urlinspector.app.sms
+
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import com.urlinspector.app.ShareHandlerActivity
+import com.urlinspector.core.model.Verdict
+
+class AndroidScanNotifier(private val context: Context) : ScanNotifier {
+
+    override fun notify(url: String, verdict: Verdict) {
+        val title = when (verdict) {
+            Verdict.SAFE -> "Safe link found in a text message"
+            Verdict.SUSPICIOUS -> "Suspicious link found in a text message"
+            Verdict.MALICIOUS -> "⚠️ Malicious link found in a text message"
+        }
+
+        // Reuses ShareHandlerActivity's existing ACTION_SEND/EXTRA_TEXT
+        // handling (M4) — the exact same entry point WhatsApp/Messages
+        // shares use, so tapping this notification gets the identical
+        // auto-scan-to-verdict flow, with no new Activity needed.
+        val tapIntent = Intent(context, ShareHandlerActivity::class.java).apply {
+            action = Intent.ACTION_SEND
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, url)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            url.hashCode(),
+            tapIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val notification = NotificationCompat.Builder(context, NotificationChannels.CHANNEL_ID_RESULTS)
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setContentTitle(title)
+            .setContentText(url)
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .build()
+
+        // NotificationManagerCompat.notify() is a documented no-op (not a
+        // crash) if POST_NOTIFICATIONS isn't granted on API 33+ — no
+        // explicit permission check needed here.
+        NotificationManagerCompat.from(context).notify(url.hashCode(), notification)
+    }
+}
+```
+
+`url.hashCode()` as the notification ID means a repeated scan of the
+same URL updates/replaces its existing notification rather than piling
+up duplicates — acceptable, simple behavior for v1.
+
+- [ ] **Step 4: Verify it compiles**
+
+Run: `./gradlew :androidApp:assembleDebug`
+Expected: BUILD SUCCESSFUL.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add androidApp/src/main/kotlin/com/urlinspector/app/sms/NotificationChannels.kt \
+        androidApp/src/main/kotlin/com/urlinspector/app/sms/AndroidScanNotifier.kt \
+        androidApp/src/main/kotlin/com/urlinspector/app/UrlInspectorApp.kt
+git commit -m "feat(androidApp): add notification channels and AndroidScanNotifier"
+```
+
+---
+
+### Task 34: `SmsContentObserverService` — foreground service + `ContentObserver`
+
+**Files:**
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/sms/SmsContentObserverService.kt`
+- Modify: `androidApp/src/main/AndroidManifest.xml`
+
+**Interfaces:**
+- Consumes: `SmsScanCoordinator` (Task 32), `AndroidScanNotifier` (Task
+  33), `core.ScanUrlUseCase` (via Koin, already bound in `AppModule.kt`).
+- Produces: `class SmsContentObserverService : Service()` with
+  `companion object { fun start(context: Context); fun stop(context:
+  Context) }`. Task 35's Settings screen calls `start`/`stop`.
+
+No automated test — a foreground `Service` + `ContentObserver` +
+`ContentResolver` query against the real SMS provider cannot be
+meaningfully unit-tested without an Android framework/Robolectric
+dependency this project doesn't have; Task 36's on-device pass (using
+the emulator's `adb emu sms send` to actually insert a message into the
+system SMS provider) is the real, and only meaningful, proof this works
+— consistent with this project's established practice for Android
+framework glue.
+
+- [ ] **Step 1: Write `SmsContentObserverService.kt`**
+
+```kotlin
+package com.urlinspector.app.sms
+
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.database.ContentObserver
+import android.net.Uri
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import android.provider.Telephony
+import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
+import com.urlinspector.core.ScanUrlUseCase
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import org.koin.android.ext.android.inject
+
+class SmsContentObserverService : Service() {
+
+    private val scanUrlUseCase: ScanUrlUseCase by inject()
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private lateinit var coordinator: SmsScanCoordinator
+    private lateinit var observer: ContentObserver
+    private var lastSeenTimestampMillis = System.currentTimeMillis()
+
+    override fun onCreate() {
+        super.onCreate()
+        coordinator = SmsScanCoordinator(scanUrlUseCase, AndroidScanNotifier(this))
+
+        startForeground(FOREGROUND_NOTIFICATION_ID, buildStatusNotification())
+
+        observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean, uri: Uri?) {
+                serviceScope.launch { processNewMessages() }
+            }
+        }
+        contentResolver.registerContentObserver(Telephony.Sms.CONTENT_URI, true, observer)
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onDestroy() {
+        contentResolver.unregisterContentObserver(observer)
+        serviceScope.cancel()
+        super.onDestroy()
+    }
+
+    private suspend fun processNewMessages() {
+        try {
+            contentResolver.query(
+                Telephony.Sms.Inbox.CONTENT_URI,
+                arrayOf(Telephony.Sms.BODY, Telephony.Sms.DATE),
+                "${Telephony.Sms.DATE} > ?",
+                arrayOf(lastSeenTimestampMillis.toString()),
+                "${Telephony.Sms.DATE} ASC",
+            )?.use { cursor ->
+                val bodyIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.BODY)
+                val dateIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.DATE)
+                while (cursor.moveToNext()) {
+                    lastSeenTimestampMillis = maxOf(lastSeenTimestampMillis, cursor.getLong(dateIndex))
+                    coordinator.processMessageBody(cursor.getString(bodyIndex))
+                }
+            }
+        } catch (e: SecurityException) {
+            // READ_SMS was revoked while this service was running (e.g.
+            // via system Settings) — stop scanning immediately rather
+            // than continuing to fail silently on every future change.
+            stopSelf()
+        }
+    }
+
+    private fun buildStatusNotification() =
+        NotificationCompat.Builder(this, NotificationChannels.CHANNEL_ID_STATUS)
+            .setSmallIcon(android.R.drawable.ic_menu_view)
+            .setContentTitle("URL Inspector")
+            .setContentText("Watching for links in text messages")
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .build()
+
+    companion object {
+        private const val FOREGROUND_NOTIFICATION_ID = 2001
+
+        fun start(context: Context) {
+            ContextCompat.startForegroundService(context, Intent(context, SmsContentObserverService::class.java))
+        }
+
+        fun stop(context: Context) {
+            context.stopService(Intent(context, SmsContentObserverService::class.java))
+        }
+    }
+}
+```
+
+`lastSeenTimestampMillis` is initialized to "now" in `onCreate()`
+specifically so a freshly (re)started service never re-scans the user's
+entire existing SMS history — only messages that arrive after the
+service starts. This is a deliberate product decision: retroactively
+scanning years of old messages the first time a user opts in would be
+surprising and slow; the feature is about *incoming* messages, matching
+intent.md §3(c)'s "watches incoming SMS/RCS messages."
+
+- [ ] **Step 2: Register the service and add permissions to the manifest**
+
+Modify `AndroidManifest.xml`. Add these three `<uses-permission>` lines
+alongside the existing `INTERNET` one (order doesn't matter, but keep
+them grouped):
+
+```xml
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+```
+
+Add the `<service>` block inside `<application>`, alongside the two
+existing `<activity>` blocks:
+
+```xml
+        <service
+            android:name=".sms.SmsContentObserverService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Watches the SMS inbox locally to scan links in incoming messages for phishing/malware, per explicit user opt-in." />
+        </service>
+```
+
+- [ ] **Step 3: Verify it compiles**
+
+Run: `./gradlew :androidApp:assembleDebug`
+Expected: BUILD SUCCESSFUL.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add androidApp/src/main/kotlin/com/urlinspector/app/sms/SmsContentObserverService.kt \
+        androidApp/src/main/AndroidManifest.xml
+git commit -m "feat(androidApp): add SmsContentObserverService (foreground SMS observer)"
+```
+
+---
+
+### Task 35: Settings screen — toggle, permission flow, navigation wiring
+
+**Files:**
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/settings/SettingsViewModel.kt`
+- Create: `androidApp/src/main/kotlin/com/urlinspector/app/settings/SettingsScreen.kt`
+- Test: `androidApp/src/test/kotlin/com/urlinspector/app/settings/SettingsViewModelTest.kt`
+- Modify: `androidApp/src/main/kotlin/com/urlinspector/app/AppNavHost.kt`
+- Modify: `androidApp/src/main/kotlin/com/urlinspector/app/scan/PasteScreen.kt`
+
+**Interfaces:**
+- Consumes: `ScanPreferences` (Task 31), `SmsContentObserverService.start`/`.stop`
+  (Task 34).
+- Produces: `class SettingsViewModel(preferences: ScanPreferences) :
+  ViewModel()` with `val smsScanningEnabled: StateFlow<Boolean>` and
+  `fun setSmsScanningEnabled(enabled: Boolean)`; `@Composable fun
+  SettingsScreen(...)`; a new `"settings"` route in `AppNavHost`; a new
+  "Settings" entry point on `PasteScreen`. Task 36 exercises this
+  end-to-end on-device.
+
+`SettingsViewModel` is a thin pass-through over `ScanPreferences` — its
+one piece of real logic (nothing to do with permissions, which live in
+the Composable/Activity layer since only they can launch a permission
+request) is exposing the preference as ViewModel-scoped state, so it
+gets a small unit test using a fake `ScanPreferences`.
+
+- [ ] **Step 1: Write the failing `SettingsViewModel` test**
+
+```kotlin
+package com.urlinspector.app.settings
+
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+private class FakeScanPreferences(initiallyEnabled: Boolean = false) : ScanPreferences {
+    private val _smsScanningEnabled = MutableStateFlow(initiallyEnabled)
+    override val smsScanningEnabled: StateFlow<Boolean> = _smsScanningEnabled.asStateFlow()
+    var setCallCount = 0
+        private set
+
+    override fun setSmsScanningEnabled(enabled: Boolean) {
+        setCallCount++
+        _smsScanningEnabled.value = enabled
+    }
+}
+
+class SettingsViewModelTest {
+
+    private val dispatcher = StandardTestDispatcher()
+
+    @BeforeEach
+    fun setUp() {
+        Dispatchers.setMain(dispatcher)
+    }
+
+    @AfterEach
+    fun tearDown() {
+        Dispatchers.resetMain()
+    }
+
+    @Test
+    fun `reflects the preference's initial value`() = runTest {
+        val viewModel = SettingsViewModel(FakeScanPreferences(initiallyEnabled = false))
+        assertFalse(viewModel.smsScanningEnabled.value)
+    }
+
+    @Test
+    fun `reflects an initially-enabled preference`() = runTest {
+        val viewModel = SettingsViewModel(FakeScanPreferences(initiallyEnabled = true))
+        assertTrue(viewModel.smsScanningEnabled.value)
+    }
+
+    @Test
+    fun `setSmsScanningEnabled delegates to the preferences store`() = runTest {
+        val preferences = FakeScanPreferences()
+        val viewModel = SettingsViewModel(preferences)
+
+        viewModel.setSmsScanningEnabled(true)
+
+        assertEquals(1, preferences.setCallCount)
+        assertTrue(viewModel.smsScanningEnabled.value)
+    }
+}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `./gradlew :androidApp:testDebugUnitTest --tests "com.urlinspector.app.settings.SettingsViewModelTest"`
+Expected: FAIL with "unresolved reference: SettingsViewModel".
+
+- [ ] **Step 3: Write `SettingsViewModel.kt`**
+
+```kotlin
+package com.urlinspector.app.settings
+
+import androidx.lifecycle.ViewModel
+import kotlinx.coroutines.flow.StateFlow
+
+class SettingsViewModel(
+    private val preferences: ScanPreferences,
+) : ViewModel() {
+    val smsScanningEnabled: StateFlow<Boolean> = preferences.smsScanningEnabled
+
+    fun setSmsScanningEnabled(enabled: Boolean) {
+        preferences.setSmsScanningEnabled(enabled)
+    }
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `./gradlew :androidApp:testDebugUnitTest --tests "com.urlinspector.app.settings.SettingsViewModelTest"`
+Expected: PASS (3/3).
+
+- [ ] **Step 5: Bind `SettingsViewModel` in `AppModule.kt`**
+
+Add alongside the other `viewModel { ... }` bindings:
+
+```kotlin
+    viewModel { SettingsViewModel(get()) }
+```
+
+(Add `import com.urlinspector.app.settings.SettingsViewModel` at the
+top.)
+
+- [ ] **Step 6: Write `SettingsScreen.kt`**
+
+```kotlin
+package com.urlinspector.app.settings
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.LocalActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import com.urlinspector.app.sms.SmsContentObserverService
+import org.koin.androidx.compose.koinViewModel
+
+private fun hasReadSmsPermission(context: android.content.Context): Boolean =
+    ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) ==
+        PackageManager.PERMISSION_GRANTED
+
+@Composable
+fun SettingsScreen(
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+    viewModel: SettingsViewModel = koinViewModel(),
+) {
+    val context = LocalContext.current
+    val enabled by viewModel.smsScanningEnabled.collectAsState()
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grants ->
+        val readSmsGranted = grants[Manifest.permission.READ_SMS] == true
+        if (readSmsGranted) {
+            viewModel.setSmsScanningEnabled(true)
+            SmsContentObserverService.start(context)
+        }
+        // If denied, the toggle simply stays off (state was never
+        // flipped to true) — no error dialog needed for v1.
+    }
+
+    // Re-check on every resume: if the user revoked READ_SMS from system
+    // Settings while this toggle was on, force it off and stop the
+    // service — the second half of "revoking permission stops scanning."
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME &&
+                enabled &&
+                !hasReadSmsPermission(context)
+            ) {
+                viewModel.setSmsScanningEnabled(false)
+                SmsContentObserverService.stop(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Text("Settings", style = MaterialTheme.typography.headlineMedium)
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column {
+                Text("Scan text messages for links")
+                Text(
+                    "Off by default. Watches incoming SMS for links and shows a scan result notification.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Switch(
+                checked = enabled,
+                onCheckedChange = { checked ->
+                    if (checked) {
+                        val permissionsToRequest = mutableListOf(Manifest.permission.READ_SMS)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                        permissionLauncher.launch(permissionsToRequest.toTypedArray())
+                    } else {
+                        viewModel.setSmsScanningEnabled(false)
+                        SmsContentObserverService.stop(context)
+                    }
+                },
+            )
+        }
+
+        TextButton(onClick = onBack) {
+            Text("Back")
+        }
+    }
+}
+```
+
+(`androidx.activity.compose.LocalActivity` is imported for parity with
+this file's other Activity-scoped imports but not directly referenced —
+`rememberLauncherForActivityResult` internally requires being composed
+under an `Activity`/`ComponentActivity`, which both `MainActivity` and
+`ShareHandlerActivity` are; remove the unused `LocalActivity` import if
+your Kotlin compiler flags it as unused.)
+
+- [ ] **Step 7: Add the `"settings"` route to `AppNavHost.kt`**
+
+Modify `AppNavHost.kt`: add a new route constant and `composable` block.
+Add near the top with the other route constants:
+
+```kotlin
+private const val ROUTE_SETTINGS = "settings"
+```
+
+Add a new parameter `onOpenSettings: () -> Unit` is not needed — instead
+wire navigation directly through `navController`, matching the existing
+`onOpenHistory` pattern. Add this new composable block inside the
+`NavHost { ... }`, alongside the existing `ROUTE_HISTORY` block:
+
+```kotlin
+        composable(ROUTE_SETTINGS) {
+            com.urlinspector.app.settings.SettingsScreen(
+                onBack = { navController.popBackStack() },
+            )
+        }
+```
+
+And update the `ROUTE_PASTE` composable's `PasteScreen(...)` call to
+pass a new `onOpenSettings` callback:
+
+```kotlin
+        composable(ROUTE_PASTE) {
+            PasteScreen(
+                uiState = uiState,
+                onScan = { url -> scanViewModel.scan(url) },
+                onOpenHistory = { navController.navigate(ROUTE_HISTORY) },
+                onOpenSettings = { navController.navigate(ROUTE_SETTINGS) },
+                initialText = prefillText ?: "",
+            )
+            // ... existing LaunchedEffect(uiState) block below, unchanged
+```
+
+- [ ] **Step 8: Add the "Settings" entry point to `PasteScreen.kt`**
+
+Modify `PasteScreen.kt`'s signature to add `onOpenSettings: () -> Unit`,
+and add a second `TextButton` below the existing "View scan history"
+one:
+
+```kotlin
+@Composable
+fun PasteScreen(
+    uiState: ScanUiState,
+    onScan: (String) -> Unit,
+    onOpenHistory: () -> Unit,
+    onOpenSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+    initialText: String = "",
+) {
+    // ... existing urlText/Column/OutlinedTextField/Button/error-Text unchanged ...
+
+        TextButton(onClick = onOpenHistory) {
+            Text("View scan history")
+        }
+
+        TextButton(onClick = onOpenSettings) {
+            Text("Settings")
+        }
+    }
+}
+```
+
+- [ ] **Step 9: Verify it compiles**
+
+Run: `./gradlew :androidApp:assembleDebug`
+Expected: BUILD SUCCESSFUL.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add androidApp/src/main/kotlin/com/urlinspector/app/settings/SettingsViewModel.kt \
+        androidApp/src/main/kotlin/com/urlinspector/app/settings/SettingsScreen.kt \
+        androidApp/src/test/kotlin/com/urlinspector/app/settings/SettingsViewModelTest.kt \
+        androidApp/src/main/kotlin/com/urlinspector/app/AppNavHost.kt \
+        androidApp/src/main/kotlin/com/urlinspector/app/scan/PasteScreen.kt \
+        androidApp/src/main/kotlin/com/urlinspector/app/di/AppModule.kt
+git commit -m "feat(androidApp): add Settings screen with SMS-scanning opt-in toggle"
+```
+
+---
+
+### Task 36: On-device/emulator verification
+
+**Files:** none (verification only, no source changes).
+
+This task has no code changes and needs no `task-reviewer` code-quality
+pass — it is a manual verification pass, reported the same way M3's
+Task 25 and M4's Task 29 were.
+
+The Android emulator supports simulating an inbound SMS via its console
+protocol, exposed through `adb emu sms send <sender-number> <message>` —
+this actually inserts the message into the real on-device SMS content
+provider via the emulated modem, so it is a genuine, faithful test of
+the `ContentObserver` path (not a synthetic shortcut).
+
+- [ ] **Step 1: Build and install the debug APK**
+
+```bash
+./gradlew :androidApp:installDebug
+```
+
+- [ ] **Step 2: Launch the app and enable SMS scanning**
+
+```bash
+adb shell am start -n com.urlinspector.app/.MainActivity
+```
+
+On the paste screen, tap "Settings", then toggle "Scan text messages for
+links" on. Accept the `READ_SMS` (and, if prompted, notification)
+permission dialogs. Confirm with a screenshot
+(`adb exec-out screencap -p`) that the toggle is now on, and confirm via
+`adb shell dumpsys activity services com.urlinspector.app` that
+`SmsContentObserverService` is running.
+
+- [ ] **Step 3: Simulate an inbound SMS containing a URL**
+
+```bash
+adb emu sms send 5551234567 "Your delivery is delayed, track it: https://example.com/track123"
+```
+
+Expected: within a couple of seconds, a notification titled "Safe link
+found in a text message" (or Suspicious/Malicious, depending on what the
+heuristics/reputation fallback produce for this URL) appears, containing
+`https://example.com/track123`. Confirm with a screenshot.
+
+- [ ] **Step 4: Tap the notification and confirm it opens the verdict screen**
+
+Tap the notification (via `adb shell input tap` at the notification
+shade's location, after pulling down the shade with `adb shell cmd
+statusbar expand-notifications`, or by locating its bounds with
+`uiautomator dump` as done in prior milestones). Expected: the app opens
+directly to the verdict screen for `https://example.com/track123`
+(reusing `ShareHandlerActivity`'s existing auto-scan flow from M4).
+Confirm with a screenshot.
+
+- [ ] **Step 5: Confirm the SMS-detected scan is recorded in history**
+
+Navigate to "View scan history" and confirm the `example.com/track123`
+entry is present.
+
+- [ ] **Step 6: Confirm toggling off stops scanning**
+
+Navigate to Settings, toggle "Scan text messages for links" off. Confirm
+via `adb shell dumpsys activity services com.urlinspector.app` that
+`SmsContentObserverService` is no longer running. Send another SMS:
+
+```bash
+adb emu sms send 5551234567 "Second test: https://example.com/should-not-scan"
+```
+
+Expected: no new notification appears, and (after reopening the app) no
+new `should-not-scan` entry shows up in history.
+
+- [ ] **Step 7: Confirm revoking the permission also stops scanning**
+
+Re-enable the toggle (Step 2) so the service is running again. Then
+revoke the permission directly, bypassing the app's own toggle:
+
+```bash
+adb shell pm revoke com.urlinspector.app android.permission.READ_SMS
+```
+
+Send another SMS:
+
+```bash
+adb emu sms send 5551234567 "Third test: https://example.com/revoked-test"
+```
+
+Expected: no notification (the service's `ContentObserver` query throws
+`SecurityException` and the service stops itself). Then bring the app to
+the foreground and navigate to Settings — expected: the toggle has
+flipped to off on its own (the `ON_RESUME` re-check in `SettingsScreen`
+caught the revoked permission). Confirm both outcomes with screenshots.
+
+No commit needed for this task (no source changes) — report the outcome
+directly: which steps passed, any screenshots taken, and confirmation
+that the M5 exit criteria (docs/plan.md's M5 goal, intent.md FR3) are
+met on a real running emulator, not just in unit tests.
+
+---
+
+## Future Milestones (M6, summary only — detailed per-task breakdown to follow when it is ready to start)
 
 ### M6 — Hardening & release readiness
 - **Goal**: production-ready build.
