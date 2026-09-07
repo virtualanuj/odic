@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.urlinspector.app.history.HistoryViewModel
 import com.urlinspector.app.scan.ScanViewModel
+import com.urlinspector.app.settings.SettingsViewModel
 import com.urlinspector.data.db.UrlInspectorDatabase
 import org.koin.dsl.koinApplication
 import org.koin.dsl.module
@@ -77,5 +78,6 @@ class AppModuleTest {
     fun `appModule binds every view model the UI injects`() {
         app.koin.get<ScanViewModel>()
         app.koin.get<HistoryViewModel>()
+        app.koin.get<SettingsViewModel>()
     }
 }

@@ -18,6 +18,7 @@ import com.urlinspector.app.scan.PasteScreen
 import com.urlinspector.app.scan.ScanUiState
 import com.urlinspector.app.scan.ScanViewModel
 import com.urlinspector.app.scan.VerdictScreen
+import com.urlinspector.app.settings.SettingsScreen
 import org.koin.androidx.compose.koinViewModel
 
 private const val ROUTE_PASTE = "paste"
@@ -92,7 +93,7 @@ fun AppNavHost(
             )
         }
         composable(ROUTE_SETTINGS) {
-            com.urlinspector.app.settings.SettingsScreen(
+            SettingsScreen(
                 onBack = { navController.popBackStack() },
             )
         }
