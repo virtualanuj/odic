@@ -2,6 +2,7 @@ package com.urlinspector.app
 
 import android.app.Application
 import com.urlinspector.app.di.appModule
+import com.urlinspector.app.sms.NotificationChannels
 import org.koin.android.ext.koin.androidContext
 import org.koin.core.context.startKoin
 
@@ -12,5 +13,6 @@ class UrlInspectorApp : Application() {
             androidContext(this@UrlInspectorApp)
             modules(appModule)
         }
+        NotificationChannels.ensureCreated(this)
     }
 }
