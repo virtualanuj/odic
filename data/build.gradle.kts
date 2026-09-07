@@ -19,7 +19,7 @@ dependencies {
     implementation("io.ktor:ktor-client-content-negotiation:3.5.2")
     implementation("io.ktor:ktor-serialization-kotlinx-json:3.5.2")
 
-    implementation("app.cash.sqldelight:sqlite-driver:2.3.2")
+    testImplementation("app.cash.sqldelight:sqlite-driver:2.3.2")
 
     testImplementation(kotlin("test-junit5"))
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")

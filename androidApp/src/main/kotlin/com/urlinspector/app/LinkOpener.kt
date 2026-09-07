@@ -9,7 +9,7 @@ import android.widget.Toast
 fun Activity.openExternalLink(url: String) {
     try {
         startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-    } catch (e: ActivityNotFoundException) {
+    } catch (_: ActivityNotFoundException) {
         Toast.makeText(this, "No app found to open this link", Toast.LENGTH_SHORT).show()
     }
 }

@@ -74,4 +74,25 @@ class HttpUrlExpanderTest {
 
         assertEquals("example.com", result.host)
     }
+
+    @Test
+    fun `does not follow an https-to-http redirect (protocol downgrade)`() = runTest {
+        val engine = MockEngine { request ->
+            when (request.url.toString()) {
+                "https://short.example/abc" -> respond(
+                    content = ByteReadChannel.Empty,
+                    status = HttpStatusCode.MovedPermanently,
+                    headers = headersOf(HttpHeaders.Location, "http://phish.example/"),
+                )
+                else -> respond(content = ByteReadChannel.Empty, status = HttpStatusCode.OK)
+            }
+        }
+        val httpClient = HttpClient(engine) { followRedirects = false }
+        val expander = HttpUrlExpander(httpClient)
+        val shortUrl = ScannedUrl(raw = "https://short.example/abc", normalized = "https://short.example/abc", host = "short.example")
+
+        val result = expander.expand(shortUrl)
+
+        assertEquals("short.example", result.host)
+    }
 }

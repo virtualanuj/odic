@@ -25,7 +25,7 @@ android {
         buildConfigField(
             "String",
             "SAFE_BROWSING_API_KEY",
-            "\"${localProperties.getProperty("safeBrowsingApiKey", "")}\"",
+            "\"${localProperties.getProperty("safeBrowsingApiKey", "").replace("\\", "\\\\").replace("\"", "\\\"")}\"",
         )
     }
 
@@ -53,7 +53,13 @@ android {
             // NOT a production signing identity — before any real
             // distribution (Play Store or otherwise), replace this with a
             // real release signingConfig backed by a properly-secured
-            // keystore (never committed to source control).
+            // keystore (never committed to source control). The debug
+            // keystore is also a well-known, shared identity (not unique to
+            // this project) — so a build signed with it must not be
+            // side-loaded or distributed to beta testers either, not just
+            // kept off the Play Store, since anyone could build and
+            // distribute a convincing "update" using the same well-known
+            // debug key.
             signingConfig = signingConfigs.getByName("debug")
         }
     }

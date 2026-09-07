@@ -28,14 +28,6 @@ import org.koin.core.module.dsl.viewModel
 import org.koin.core.qualifier.named
 import org.koin.dsl.module
 
-// Real key provisioning: supply `safeBrowsingApiKey=...` in the
-// (gitignored) local.properties file — see androidApp/build.gradle.kts's
-// buildConfigField wiring. An empty/absent key means every reputation
-// lookup fails (400/403), which ScanUrlUseCase.runGuarded already turns
-// into a graceful heuristics-only fallback — this is intended, working
-// DR2 behavior, not a bug.
-private val SAFE_BROWSING_API_KEY = BuildConfig.SAFE_BROWSING_API_KEY
-
 private const val REPUTATION_HTTP_CLIENT = "reputationHttpClient"
 private const val EXPANDER_HTTP_CLIENT = "expanderHttpClient"
 private const val REQUEST_TIMEOUT_MILLIS = 5_000L
@@ -59,8 +51,14 @@ val appModule = module {
     single { ReputationCache() }
 
     single<ReputationProvider> {
+        // Real key provisioning: supply `safeBrowsingApiKey=...` in the
+        // (gitignored) local.properties file — see androidApp/build.gradle.kts's
+        // buildConfigField wiring. An empty/absent key means every reputation
+        // lookup fails (400/403), which ScanUrlUseCase.runGuarded already turns
+        // into a graceful heuristics-only fallback — this is intended, working
+        // DR2 behavior, not a bug.
         SafeBrowsingReputationProvider(
-            client = SafeBrowsingClient(get(named(REPUTATION_HTTP_CLIENT)), apiKey = SAFE_BROWSING_API_KEY),
+            client = SafeBrowsingClient(get(named(REPUTATION_HTTP_CLIENT)), apiKey = BuildConfig.SAFE_BROWSING_API_KEY),
             cache = get(),
         )
     }

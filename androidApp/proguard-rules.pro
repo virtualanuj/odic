@@ -1,21 +1,13 @@
-# kotlinx.serialization: the plugin generates serializers at compile time
-# (not reflection-based), and the library ships its own consumer rules,
-# but keep the DTOs' Companion objects explicitly as defense in depth —
-# R8 has historically had edge cases around synthetic $serializer classes
-# when aggressive optimization is combined with shrinking.
--keepclassmembers class com.urlinspector.data.reputation.** {
-    *** Companion;
-}
--keepclasseswithmembers class com.urlinspector.data.reputation.** {
-    kotlinx.serialization.KSerializer serializer(...);
-}
-
-# SQLDelight-generated database/query classes are constructed reflectively
-# in a few internal paths; keep the generated package intact.
--keep class com.urlinspector.data.db.** { *; }
-
-# Koin builds its dependency graph via a DSL, not reflection, but keep
-# the DI module's declared types' constructors reachable defensively.
--keepclassmembers class com.urlinspector.app.** {
-    public <init>(...);
-}
+# kotlinx.serialization, Ktor, SQLDelight, and Koin all ship their own
+# consumer ProGuard rules bundled in their published artifacts (verified by
+# inspecting androidApp/build/outputs/mapping/release/configuration.txt during
+# Task 39's release build) — the DTOs' $$serializer classes, Koin's DI graph,
+# and Ktor's CIO engine ServiceLoader registration are all correctly kept
+# by those consumer rules without any project-level rule needed here.
+# SQLDelight-generated code uses no reflection at all and needs no keep rule.
+#
+# This file intentionally starts empty. If a future dependency addition (or
+# an R8 crash discovered on a real device) requires a project-level rule,
+# add it here with a comment citing the specific class/behavior it protects
+# and how you verified the rule is actually needed (e.g. by removing it and
+# checking mapping/release/seeds.txt or reproducing the crash).

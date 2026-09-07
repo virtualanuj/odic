@@ -1,0 +1,9 @@
+# Copy this file to local.properties (gitignored) and fill in your own values.
+
+# Path to your Android SDK installation.
+sdk.dir=/path/to/android-sdk
+
+# Optional: a real Google Safe Browsing v4 API key. Leave unset/empty to
+# keep the app's heuristics-only fallback behavior (DR2) — every reputation
+# lookup will fail gracefully rather than being checked.
+safeBrowsingApiKey=

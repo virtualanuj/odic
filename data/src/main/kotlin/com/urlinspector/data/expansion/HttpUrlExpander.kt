@@ -34,7 +34,19 @@ class HttpUrlExpander(
                 return normalizeUrl(current) ?: url
             }
             val location = response.headers[HttpHeaders.Location] ?: return normalizeUrl(current) ?: url
-            current = URI(current).resolve(location).toString()
+            val next = URI(current).resolve(location).toString()
+            if (current.startsWith("https://", ignoreCase = true) && !next.startsWith("https://", ignoreCase = true)) {
+                // Refuse an https -> http protocol downgrade mid-redirect-chain.
+                // Ktor's CIO engine has its own TLS stack and does not consult
+                // Android's network security policy (androidApp's
+                // network_security_config.xml, which declares cleartext
+                // traffic disallowed) — this app-level guard is what actually
+                // enforces that policy for the one code path in this app that
+                // can vary scheme (a shortener redirect), since the platform
+                // config alone does not bind CIO's raw-socket requests.
+                return normalizeUrl(current) ?: url
+            }
+            current = next
         }
         return normalizeUrl(current) ?: url
     }
