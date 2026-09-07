@@ -23,6 +23,7 @@ fun PasteScreen(
     uiState: ScanUiState,
     onScan: (String) -> Unit,
     onOpenHistory: () -> Unit,
+    onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
     initialText: String = "",
 ) {
@@ -61,6 +62,10 @@ fun PasteScreen(
 
         TextButton(onClick = onOpenHistory) {
             Text("View scan history")
+        }
+
+        TextButton(onClick = onOpenSettings) {
+            Text("Settings")
         }
     }
 }

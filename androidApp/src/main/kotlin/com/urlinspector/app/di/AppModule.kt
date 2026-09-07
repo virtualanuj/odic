@@ -9,6 +9,7 @@ import com.urlinspector.core.UrlExpander
 import com.urlinspector.app.history.HistoryViewModel
 import com.urlinspector.app.scan.ScanViewModel
 import com.urlinspector.app.settings.ScanPreferences
+import com.urlinspector.app.settings.SettingsViewModel
 import com.urlinspector.app.settings.SharedPreferencesScanPreferences
 import com.urlinspector.data.db.SqlDelightScanRepository
 import com.urlinspector.data.db.UrlInspectorDatabase
@@ -81,4 +82,5 @@ val appModule = module {
 
     viewModel { ScanViewModel(get()) }
     viewModel { HistoryViewModel(get()) }
+    viewModel { SettingsViewModel(get()) }
 }

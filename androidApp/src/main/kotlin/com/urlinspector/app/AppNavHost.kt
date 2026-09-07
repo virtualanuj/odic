@@ -23,6 +23,7 @@ import org.koin.androidx.compose.koinViewModel
 private const val ROUTE_PASTE = "paste"
 private const val ROUTE_VERDICT = "verdict"
 private const val ROUTE_HISTORY = "history"
+private const val ROUTE_SETTINGS = "settings"
 
 @Composable
 fun AppNavHost(
@@ -49,6 +50,7 @@ fun AppNavHost(
                 uiState = uiState,
                 onScan = { url -> scanViewModel.scan(url) },
                 onOpenHistory = { navController.navigate(ROUTE_HISTORY) },
+                onOpenSettings = { navController.navigate(ROUTE_SETTINGS) },
                 initialText = prefillText ?: "",
             )
             LaunchedEffect(uiState) {
@@ -86,6 +88,11 @@ fun AppNavHost(
                 entries = entries,
                 onDelete = historyViewModel::delete,
                 onClearAll = historyViewModel::clearAll,
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable(ROUTE_SETTINGS) {
+            com.urlinspector.app.settings.SettingsScreen(
                 onBack = { navController.popBackStack() },
             )
         }
