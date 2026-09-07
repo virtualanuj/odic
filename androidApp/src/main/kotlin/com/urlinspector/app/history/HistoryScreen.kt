@@ -15,6 +15,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.urlinspector.core.model.ScanHistoryEntry
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+
+private val historyTimestampFormatter: DateTimeFormatter = DateTimeFormatter
+    .ofPattern("MMM d, yyyy h:mm a")
+    .withZone(ZoneId.systemDefault())
 
 @Composable
 fun HistoryScreen(
@@ -38,7 +44,7 @@ fun HistoryScreen(
         if (entries.isEmpty()) {
             Text("No scans yet.")
         } else {
-            LazyColumn {
+            LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 items(entries, key = { it.id }) { entry ->
                     Row(
                         modifier = Modifier
@@ -46,9 +52,13 @@ fun HistoryScreen(
                             .padding(vertical = 8.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        Column {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(entry.url, style = MaterialTheme.typography.bodyMedium)
                             Text(entry.verdict.name, style = MaterialTheme.typography.labelMedium)
+                            Text(
+                                historyTimestampFormatter.format(entry.scannedAt),
+                                style = MaterialTheme.typography.labelSmall,
+                            )
                         }
                         TextButton(onClick = { onDelete(entry.id) }) {
                             Text("Delete")

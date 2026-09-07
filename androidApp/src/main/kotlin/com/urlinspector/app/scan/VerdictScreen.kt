@@ -46,7 +46,11 @@ fun VerdictScreen(
         if (result.heuristicFindings.isEmpty()) {
             Text("No issues found.")
         } else {
-            LazyColumn(modifier = Modifier.fillMaxWidth()) {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+            ) {
                 items(result.heuristicFindings) { finding ->
                     Text("• ${finding.description}", modifier = Modifier.padding(vertical = 4.dp))
                 }

@@ -53,6 +53,8 @@ dependencies {
 
     testImplementation(kotlin("test-junit5"))
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    testImplementation("io.insert-koin:koin-test:4.2.2")
+    testImplementation("org.mockito:mockito-core:5.23.0")
 }
 
 tasks.withType<Test> {

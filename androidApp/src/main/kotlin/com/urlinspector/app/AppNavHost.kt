@@ -55,6 +55,13 @@ fun AppNavHost(
                     onBack = onVerdictBack,
                     onOpenLink = onOpenLink,
                 )
+            } else {
+                // Scan state does not survive process death; if this route is
+                // restored without a live result, fall back to the paste screen
+                // instead of rendering a blank screen.
+                LaunchedEffect(Unit) {
+                    navController.popBackStack(ROUTE_PASTE, inclusive = false)
+                }
             }
         }
         composable(ROUTE_HISTORY) {

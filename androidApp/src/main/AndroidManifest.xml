@@ -4,7 +4,7 @@
 
     <application
         android:name=".UrlInspectorApp"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:label="URL Inspector"
         android:theme="@style/Theme.UrlInspector">
         <activity
