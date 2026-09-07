@@ -5,6 +5,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -31,8 +34,11 @@ fun AppNavHost(
 ) {
     val uiState by scanViewModel.uiState.collectAsState()
 
+    var didAutoScan by rememberSaveable { mutableStateOf(false) }
+
     LaunchedEffect(sharedUrl) {
-        if (sharedUrl != null && uiState is ScanUiState.Idle) {
+        if (sharedUrl != null && !didAutoScan) {
+            didAutoScan = true
             scanViewModel.scan(sharedUrl)
         }
     }

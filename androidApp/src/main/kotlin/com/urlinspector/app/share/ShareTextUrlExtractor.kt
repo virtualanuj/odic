@@ -12,5 +12,5 @@ private val TRAILING_PUNCTUATION = charArrayOf('.', ',', ')', ']', '}', '!', '?'
  */
 fun extractFirstUrl(text: String): String? {
     val match = URL_REGEX.find(text) ?: return null
-    return match.value.trimEnd(*TRAILING_PUNCTUATION).ifBlank { null }
+    return match.value.trimEnd(*TRAILING_PUNCTUATION)
 }
