@@ -1,6 +1,15 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application") version "9.4.0"
     kotlin("plugin.compose") version "2.4.10"
+}
+
+val localProperties = Properties().apply {
+    val localPropertiesFile = rootProject.file("local.properties")
+    if (localPropertiesFile.exists()) {
+        localPropertiesFile.inputStream().use { load(it) }
+    }
 }
 
 android {
@@ -13,10 +22,16 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+        buildConfigField(
+            "String",
+            "SAFE_BROWSING_API_KEY",
+            "\"${localProperties.getProperty("safeBrowsingApiKey", "")}\"",
+        )
     }
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     compileOptions {

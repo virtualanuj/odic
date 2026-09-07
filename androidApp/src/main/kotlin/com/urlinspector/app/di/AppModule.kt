@@ -2,6 +2,7 @@ package com.urlinspector.app.di
 
 import android.content.Context
 import app.cash.sqldelight.driver.android.AndroidSqliteDriver
+import com.urlinspector.app.BuildConfig
 import com.urlinspector.core.ReputationProvider
 import com.urlinspector.core.ScanRepository
 import com.urlinspector.core.ScanUrlUseCase
@@ -27,12 +28,13 @@ import org.koin.core.module.dsl.viewModel
 import org.koin.core.qualifier.named
 import org.koin.dsl.module
 
-// TODO(future milestone): real key provisioning (build config / secrets
-// management) is out of scope for M3. An empty key means every reputation
+// Real key provisioning: supply `safeBrowsingApiKey=...` in the
+// (gitignored) local.properties file — see androidApp/build.gradle.kts's
+// buildConfigField wiring. An empty/absent key means every reputation
 // lookup fails (400/403), which ScanUrlUseCase.runGuarded already turns
 // into a graceful heuristics-only fallback — this is intended, working
-// DR2 behavior for now, not a bug.
-private const val SAFE_BROWSING_API_KEY = ""
+// DR2 behavior, not a bug.
+private val SAFE_BROWSING_API_KEY = BuildConfig.SAFE_BROWSING_API_KEY
 
 private const val REPUTATION_HTTP_CLIENT = "reputationHttpClient"
 private const val EXPANDER_HTTP_CLIENT = "expanderHttpClient"
