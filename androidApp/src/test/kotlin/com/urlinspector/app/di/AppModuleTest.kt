@@ -1,6 +1,7 @@
 package com.urlinspector.app.di
 
 import android.content.Context
+import android.content.SharedPreferences
 import com.urlinspector.app.history.HistoryViewModel
 import com.urlinspector.app.scan.ScanViewModel
 import com.urlinspector.data.db.UrlInspectorDatabase
@@ -30,7 +31,14 @@ import kotlin.test.Test
 class AppModuleTest {
 
     private val androidOverrides = module {
-        single<Context> { Mockito.mock(Context::class.java) }
+        single<Context> {
+            val mockSharedPrefs = Mockito.mock(SharedPreferences::class.java)
+            Mockito.`when`(mockSharedPrefs.getBoolean("sms_scanning_enabled", false)).thenReturn(false)
+            val mockContext = Mockito.mock(Context::class.java)
+            Mockito.`when`(mockContext.getSharedPreferences("url_inspector_settings", Context.MODE_PRIVATE))
+                .thenReturn(mockSharedPrefs)
+            mockContext
+        }
         single { Mockito.mock(UrlInspectorDatabase::class.java) }
     }
 
@@ -55,7 +63,12 @@ class AppModuleTest {
     fun `appModule resolves every declared binding`() {
         MockProvider.register { clazz -> Mockito.mock(clazz.java) }
         checkKoinModules(listOf(appModule)) {
-            withInstance<Context>(Mockito.mock(Context::class.java))
+            val mockSharedPrefs = Mockito.mock(SharedPreferences::class.java)
+            Mockito.`when`(mockSharedPrefs.getBoolean("sms_scanning_enabled", false)).thenReturn(false)
+            val mockContext = Mockito.mock(Context::class.java)
+            Mockito.`when`(mockContext.getSharedPreferences("url_inspector_settings", Context.MODE_PRIVATE))
+                .thenReturn(mockSharedPrefs)
+            withInstance<Context>(mockContext)
             withInstance<UrlInspectorDatabase>(Mockito.mock(UrlInspectorDatabase::class.java))
         }
     }
