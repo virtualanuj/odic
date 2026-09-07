@@ -38,6 +38,25 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            // TODO(follow-up, not part of M6): this reuses the debug
+            // signing config purely so assembleRelease/installRelease can
+            // be built and smoke-tested on a development machine. This is
+            // NOT a production signing identity — before any real
+            // distribution (Play Store or otherwise), replace this with a
+            // real release signingConfig backed by a properly-secured
+            // keystore (never committed to source control).
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
 }
 
 dependencies {
