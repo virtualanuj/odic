@@ -24,8 +24,9 @@ fun PasteScreen(
     onScan: (String) -> Unit,
     onOpenHistory: () -> Unit,
     modifier: Modifier = Modifier,
+    initialText: String = "",
 ) {
-    var urlText by rememberSaveable { mutableStateOf("") }
+    var urlText by rememberSaveable { mutableStateOf(initialText) }
 
     Column(
         modifier = modifier

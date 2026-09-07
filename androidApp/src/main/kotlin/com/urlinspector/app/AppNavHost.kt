@@ -26,8 +26,16 @@ fun AppNavHost(
     onOpenLink: (String) -> Unit,
     navController: NavHostController = rememberNavController(),
     scanViewModel: ScanViewModel = koinViewModel(),
+    sharedUrl: String? = null,
+    prefillText: String? = null,
 ) {
     val uiState by scanViewModel.uiState.collectAsState()
+
+    LaunchedEffect(sharedUrl) {
+        if (sharedUrl != null && uiState is ScanUiState.Idle) {
+            scanViewModel.scan(sharedUrl)
+        }
+    }
 
     NavHost(navController = navController, startDestination = ROUTE_PASTE) {
         composable(ROUTE_PASTE) {
@@ -35,6 +43,7 @@ fun AppNavHost(
                 uiState = uiState,
                 onScan = { url -> scanViewModel.scan(url) },
                 onOpenHistory = { navController.navigate(ROUTE_HISTORY) },
+                initialText = prefillText ?: "",
             )
             LaunchedEffect(uiState) {
                 if (uiState is ScanUiState.Success) {
